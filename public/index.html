@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DevSwitch · 本地登录 / 租户切换</title>
+<link rel="stylesheet" href="/styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎛</text></svg>">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <div class="brand-mark">DS</div>
+    <div class="brand-text">
+      <strong>DevSwitch</strong>
+      <span>本地登录 &amp; 租户切换</span>
+    </div>
+  </div>
+
+  <div class="target">
+    <label for="targetInput">后端服务</label>
+    <div class="target-field">
+      <input id="targetInput" type="text" spellcheck="false" placeholder="http://localhost:8080"
+             title="填 localhost 最稳：它会同时尝试 IPv6(::1) 与 IPv4(127.0.0.1)。127.0.0.1 只认 IPv4，遇到只绑 IPv6 的后端会连不上（面板会自动兜底换名）。">
+      <button id="pingBtn" class="btn btn-ghost" title="请求后端根路径，检测是否在线">检测</button>
+    </div>
+    <div id="pingState" class="ping"><i class="dot"></i><span>未检测</span></div>
+  </div>
+
+  <div class="top-actions">
+    <div id="sessionPill" class="pill pill-off">未登录</div>
+    <button id="settingsBtn" class="btn btn-ghost" title="打开配置">⚙ 配置</button>
+  </div>
+</header>
+
+<main class="layout">
+  <!-- ============ 左栏：账号 / 租户 ============ -->
+  <aside class="col-side">
+    <section class="card">
+      <div class="card-head">
+        <h2>账号</h2>
+        <button class="btn btn-mini" data-add="account">+ 新增</button>
+      </div>
+      <div id="accountList" class="list"></div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <h2>租户</h2>
+        <div class="head-tools">
+          <button class="btn btn-mini" id="pullTenantsBtn" title="调用「租户列表」接口自动拉取">⟳ 拉取</button>
+          <button class="btn btn-mini" data-add="tenant">+ 新增</button>
+        </div>
+      </div>
+      <div class="filter-bar">
+        <input id="tenantFilter" type="search" placeholder="筛选租户名 / ID" spellcheck="false" autocomplete="off">
+        <span class="filter-count" id="tenantCount"></span>
+      </div>
+      <div class="list-scroll-wrap">
+        <div id="tenantList" class="list list-scroll"></div>
+      </div>
+      <p class="hint" id="tenantHint" hidden></p>
+    </section>
+  </aside>
+
+  <!-- ============ 主栏：组合 / 会话 / 调试 ============ -->
+  <section class="col-main">
+
+    <section class="card">
+      <div class="card-head">
+        <h2>组合 <span class="sub">点一下 = 登录 + 切租户</span></h2>
+        <button class="btn btn-mini" data-add="combo">+ 新建组合</button>
+      </div>
+      <div id="comboGrid" class="combo-grid"></div>
+      <p class="hint">组合是「账号 + 租户」的快照，用于在多个身份之间反复横跳。</p>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <h2>当前会话</h2>
+        <div class="head-tools">
+          <button class="btn btn-mini btn-accent" id="importCookieBtn" title="从浏览器 DevTools 复制 Cookie 粘贴进来，跳过登录接口">导入 Cookie</button>
+          <button class="btn btn-mini" id="copyTokenBtn">复制 Token</button>
+          <button class="btn btn-mini" id="copyCurlBtn">复制 curl</button>
+          <button class="btn btn-mini btn-danger" id="clearSessionBtn">清空</button>
+        </div>
+      </div>
+      <div id="lockGuard" hidden></div>
+      <div id="sessionBody" class="session"></div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <h2>请求调试 <span class="sub">带上当前会话直接打后端</span></h2>
+        <div class="head-tools">
+          <label class="check"><input type="checkbox" id="withAuth" checked><span>带 Token</span></label>
+          <label class="check"><input type="checkbox" id="withTenant" checked><span>带租户头</span></label>
+        </div>
+      </div>
+
+      <div class="req-line">
+        <select id="reqMethod" class="select">
+          <option>GET</option><option>POST</option><option>PUT</option>
+          <option>PATCH</option><option>DELETE</option><option>HEAD</option>
+        </select>
+        <input id="reqPath" type="text" spellcheck="false" placeholder="/api/user/current">
+        <button id="sendBtn" class="btn btn-primary">发送</button>
+      </div>
+      <textarea id="reqBody" class="code-area" spellcheck="false" rows="4" placeholder='请求体（JSON，GET 可留空）'></textarea>
+
+      <div id="respPanel" class="resp" hidden>
+        <div class="resp-head">
+          <span id="respStatus" class="status-badge"></span>
+          <span id="respMeta" class="resp-meta"></span>
+          <div class="resp-tabs">
+            <button class="tab active" data-tab="body">响应</button>
+            <button class="tab" data-tab="headers">响应头</button>
+            <button class="tab" data-tab="curl">curl</button>
+          </div>
+        </div>
+        <pre id="respPre" class="code-block"></pre>
+      </div>
+    </section>
+
+    <footer class="foot">
+      <span>配置文件：<code>data/state.json</code></span>
+      <span>所有请求经本地服务 <code>/api/proxy</code> 转发，无 CORS / Cookie 限制</span>
+    </footer>
+  </section>
+</main>
+
+<!-- ============ 配置抽屉 ============ -->
+<div id="settingsMask" class="mask" hidden></div>
+<aside id="settingsPanel" class="drawer" hidden>
+  <div class="drawer-head">
+    <h2>配置</h2>
+    <div class="head-tools">
+      <button class="btn btn-mini" id="exportBtn">导出</button>
+      <button class="btn btn-mini" id="resetBtn">恢复默认</button>
+      <button class="btn btn-mini" id="closeSettings">✕</button>
+    </div>
+  </div>
+
+  <nav class="tabs-nav" id="settingsNav">
+    <button class="tab active" data-sec="login">登录</button>
+    <button class="tab" data-sec="tenant">切租户</button>
+    <button class="tab" data-sec="tenantList">租户列表</button>
+    <button class="tab" data-sec="headers">请求头</button>
+    <button class="tab" data-sec="raw">JSON</button>
+  </nav>
+
+  <div class="drawer-body">
+    <!-- 登录 -->
+    <div class="sec" data-sec="login">
+      <div class="field-row">
+        <label class="check"><input type="checkbox" data-bind="login.enabled"><span>启用登录</span></label>
+      </div>
+      <div class="grid2">
+        <div class="field"><label>方法</label>
+          <select data-bind="login.method"><option>POST</option><option>GET</option><option>PUT</option></select>
+        </div>
+        <div class="field"><label>Content-Type</label>
+          <select data-bind="login.contentType"><option>json</option><option>form</option></select>
+        </div>
+      </div>
+      <div class="field"><label>登录路径</label>
+        <input data-bind="login.path" placeholder="/pds-std/api/login" spellcheck="false">
+      </div>
+      <div class="field"><label>请求体模板 <em>{{username}} {{password}}</em></label>
+        <textarea data-bind="login.bodyTemplate" class="code-area" rows="6" spellcheck="false"></textarea>
+      </div>
+      <div class="field"><label>附加请求头模板（JSON）</label>
+        <textarea data-bind="login.headersTemplate" class="code-area" rows="3" spellcheck="false"></textarea>
+      </div>
+      <div class="grid2">
+        <div class="field"><label>Token 来源</label>
+          <select data-bind="login.tokenSource">
+            <option value="cookie">Cookie（框架默认）</option>
+            <option value="header">响应头</option>
+            <option value="body">响应体 JSON</option>
+          </select>
+        </div>
+        <div class="field"><label>Token 名称 <em>cookie / 头名</em></label>
+          <input data-bind="login.tokenHeaderName" placeholder="Authorization" spellcheck="false">
+        </div>
+      </div>
+      <div class="field"><label>Token 取值路径 <em>仅「响应体」来源时使用，如 data.accessToken</em></label>
+        <input data-bind="login.tokenPath" spellcheck="false">
+      </div>
+      <div class="grid2">
+        <div class="field"><label>成功码字段 <em>Body 内路径</em></label>
+          <input data-bind="login.successPath" placeholder="retCode" spellcheck="false">
+        </div>
+        <div class="field"><label>成功码值</label>
+          <input data-bind="login.successValue" placeholder="T200" spellcheck="false">
+        </div>
+      </div>
+      <p class="hint">这套框架业务失败也返回 HTTP 200，成败看 Body 里的 retCode。填了成功码才判得准。</p>
+      <label class="check"><input type="checkbox" data-bind="login.saveCookies"><span>保存并回传 Set-Cookie</span></label>
+    </div>
+
+    <!-- 切租户 -->
+    <div class="sec" data-sec="tenant" hidden>
+      <label class="check"><input type="checkbox" data-bind="tenantSwitch.enabled"><span>启用「调用接口切租户」</span></label>
+      <p class="hint">关闭时，切租户只切换本地注入的租户头（适合靠请求头识别租户的后端）。</p>
+      <div class="grid2">
+        <div class="field"><label>方法</label>
+          <select data-bind="tenantSwitch.method"><option>POST</option><option>GET</option><option>PUT</option></select>
+        </div>
+        <div class="field"><label>Content-Type</label>
+          <select data-bind="tenantSwitch.contentType"><option>form</option><option>json</option></select>
+        </div>
+      </div>
+      <div class="field"><label>切换路径</label>
+        <input data-bind="tenantSwitch.path" placeholder="/pds-std/api/switchTenant" spellcheck="false">
+      </div>
+      <div class="field"><label>请求体模板 <em>{{tenantId}} {{tenantCode}}</em></label>
+        <textarea data-bind="tenantSwitch.bodyTemplate" class="code-area" rows="5" spellcheck="false"></textarea>
+      </div>
+      <div class="field"><label>附加请求头模板（JSON）</label>
+        <textarea data-bind="tenantSwitch.headersTemplate" class="code-area" rows="3" spellcheck="false"></textarea>
+      </div>
+      <div class="grid2">
+        <div class="field"><label>成功码字段</label>
+          <input data-bind="tenantSwitch.successPath" placeholder="retCode" spellcheck="false">
+        </div>
+        <div class="field"><label>成功码值</label>
+          <input data-bind="tenantSwitch.successValue" placeholder="T200" spellcheck="false">
+        </div>
+      </div>
+      <p class="hint">服务端用 request.getParameter("tenantId") 取值，建议用 form 方式提交。</p>
+    </div>
+
+    <!-- 租户列表 -->
+    <div class="sec" data-sec="tenantList" hidden>
+      <label class="check"><input type="checkbox" data-bind="tenantList.enabled"><span>启用「从接口拉取租户列表」</span></label>
+      <div class="field"><label>方法</label>
+        <select data-bind="tenantList.method"><option>GET</option><option>POST</option></select>
+      </div>
+      <div class="field"><label>路径</label>
+        <input data-bind="tenantList.path" spellcheck="false">
+      </div>
+      <div class="field"><label>列表所在路径 <em>如 data / data.list / data.records，留空为根</em></label>
+        <input data-bind="tenantList.listPath" spellcheck="false">
+      </div>
+      <div class="grid2">
+        <div class="field"><label>ID 字段</label><input data-bind="tenantList.idField" spellcheck="false"></div>
+        <div class="field"><label>名称字段</label><input data-bind="tenantList.nameField" spellcheck="false"></div>
+      </div>
+      <div class="grid2">
+        <div class="field"><label>成功码字段</label>
+          <input data-bind="tenantList.successPath" placeholder="retCode" spellcheck="false">
+        </div>
+        <div class="field"><label>成功码值</label>
+          <input data-bind="tenantList.successValue" placeholder="T200" spellcheck="false">
+        </div>
+      </div>
+    </div>
+
+    <!-- 请求头 -->
+    <div class="sec" data-sec="headers" hidden>
+      <div class="field-row">
+        <label class="check"><input type="checkbox" data-bind="authHeader.enabled"><span>注入 Token 头</span></label>
+      </div>
+      <div class="grid2">
+        <div class="field"><label>头名</label><input data-bind="authHeader.name" spellcheck="false"></div>
+        <div class="field"><label>值模板</label><input data-bind="authHeader.valueTemplate" spellcheck="false"></div>
+      </div>
+      <hr>
+      <div class="field-row">
+        <label class="check"><input type="checkbox" data-bind="tenantHeader.enabled"><span>注入租户头</span></label>
+      </div>
+      <div class="grid2">
+        <div class="field"><label>头名</label><input data-bind="tenantHeader.name" spellcheck="false"></div>
+        <div class="field"><label>值模板</label><input data-bind="tenantHeader.valueTemplate" spellcheck="false"></div>
+      </div>
+      <hr>
+      <div class="field"><label>全局附加请求头（JSON）<em>会叠加到每个请求</em></label>
+        <textarea data-bind="extraHeaders" class="code-area" rows="4" spellcheck="false"></textarea>
+      </div>
+      <div class="field"><label>请求超时（毫秒）</label>
+        <input data-bind="requestTimeoutMs" type="number" min="1000" step="1000">
+      </div>
+      <hr>
+      <div class="field-row">
+        <label class="check"><input type="checkbox" data-bind="autoLoopback"><span>回环主机名自动兜底</span></label>
+      </div>
+      <p class="hint">本机可能同时跑着「只绑 IPv4」和「只绑 IPv6」的后端。开启后，填
+        <code>127.0.0.1</code> 连不上时会自动改用 <code>localhost</code> / <code>[::1]</code> 再试，
+        无需为每个后端改配置。仅对 localhost / 127.0.0.1 / ::1 生效，不会去猜别的域名。</p>
+    </div>
+
+    <!-- 原始 JSON -->
+    <div class="sec" data-sec="raw" hidden>
+      <div class="field"><label>完整配置（编辑后点「应用 JSON」）</label>
+        <textarea id="rawJson" class="code-area" rows="24" spellcheck="false"></textarea>
+      </div>
+      <button class="btn btn-primary" id="applyRawBtn">应用 JSON</button>
+    </div>
+  </div>
+</aside>
+
+<!-- 通用表单弹窗 -->
+<div id="formMask" class="mask" hidden></div>
+<div id="formModal" class="modal" hidden>
+  <div class="modal-head"><h3 id="formTitle">编辑</h3></div>
+  <div id="formBody" class="modal-body"></div>
+  <div class="modal-foot">
+    <button class="btn btn-ghost" id="formCancel">取消</button>
+    <button class="btn btn-primary" id="formOk">确定</button>
+  </div>
+</div>
+
+<div id="toasts" class="toasts"></div>
+
+<script src="/app.js"></script>
+</body>
+</html>
