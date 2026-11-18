@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
+  #stage { position: relative; }
+  #stage svg { display: block; }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<script>
+  /*
+   * 只靠 URL 参数渲染任意尺寸 —— 避免为每个尺寸生成一个 html 文件。
+   * ?s=32 表示画布 32x32（图标按这个尺寸缩放，不留额外边距）
+   * ?pad=N 表示四周留白比例（0 = 满幅，Windows 图标惯例约 0.08）
+   * ?transparent=1 输出透明背景（用于比对），否则给深色底便于目视
+   */
+  const q = new URLSearchParams(location.search);
+  const size = Number(q.get('s') || 64);
+  const pad = Number(q.get('pad') || 0);
+
+  const inner = Math.max(1, Math.round(size * (1 - pad * 2)));
+  const offset = Math.round((size - inner) / 2);
+
+  document.getElementById('stage').style.width = size + 'px';
+  document.getElementById('stage').style.height = size + 'px';
+
+  // 图标本体：DS 圆角方块。用 viewBox 0 0 32 32 保证任意尺寸同构。
+  // 小尺寸时字重加大、字号略大，否则 16px 下笔画会糊成一团。
+  const fontSize = size <= 20 ? 14.2 : size <= 24 ? 13.6 : 12.8;
+  const radius = 32 * 0.265; // 8.5 / 32
+
+  const svg = `
+  <svg xmlns="http://www.w3.org/2000/svg" width="${inner}" height="${inner}" viewBox="0 0 32 32"
+       style="position:absolute;left:${offset}px;top:${offset}px">
+    <defs>
+      <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="#2f6bff"/>
+        <stop offset="1" stop-color="#5b8cff"/>
+      </linearGradient>
+    </defs>
+    <rect width="32" height="32" rx="${radius}" ry="${radius}" fill="url(#g)"/>
+    <text x="15.9" y="16" fill="#ffffff"
+          font-family="Segoe UI, -apple-system, Roboto, Helvetica Neue, Arial, sans-serif"
+          font-size="${fontSize}" font-weight="700" letter-spacing="0.2"
+          text-anchor="middle" dominant-baseline="central">DS</text>
+  </svg>`;
+  document.getElementById('stage').innerHTML = svg;
+</script>
+</body>
+</html>

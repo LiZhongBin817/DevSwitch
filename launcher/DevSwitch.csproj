@@ -1,0 +1,57 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    启动器工程。
+
+    为什么是 net48 而不是 net8/net10：
+      .NET Framework 4.8 是 Windows 10 1903+ / Windows 11 的内置组件，
+      用户机器上已经有，不需要额外装运行时；而且编译产物是单个 ~140KB 的
+      exe，不带一堆 dll 和 json。net8 那种要额外装运行时或做成
+      self-contained（体积几十 MB），对「双击即用的本地小工具」不划算。
+
+    图标通过 ApplicationIcon 写进 PE 资源段 —— 这才是「文件本身带图标」，
+    而不是靠快捷方式的 IconLocation 外挂。
+  -->
+  <PropertyGroup>
+    <!-- 控制台程序：保留黑窗口，因为要显示服务日志 -->
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <AssemblyName>DevSwitch</AssemblyName>
+    <RootNamespace>DevSwitch</RootNamespace>
+    <ApplicationIcon>..\devswitch.ico</ApplicationIcon>
+
+    <!-- 关掉隐式 using，代码里显式声明，避免 net48 下的兼容性问题 -->
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+
+    <!-- 只生成 exe，不要 pdb 和 xml -->
+    <DebugType>none</DebugType>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+
+    <!-- 版本信息：让它在「属性 → 详细信息」里像个正经应用 -->
+    <AssemblyTitle>DevSwitch</AssemblyTitle>
+    <Product>DevSwitch</Product>
+    <Description>本地开发用的登录 + 租户/组合切换工具</Description>
+    <Company>DevSwitch</Company>
+    <Version>1.0.0</Version>
+    <FileVersion>1.0.0.0</FileVersion>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <Copyright>本地开发工具</Copyright>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      net48 的引用程序集默认要从系统里找。加上这个包后，
+      即使在没有装完整 .NET Framework SDK 的机器上也能编译。
+    -->
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="All" />
+
+    <!--
+      System.Management 用来读浏览器进程的命令行，从里面找出远程调试端口。
+      浏览器如果没开调试端口，这条通道会自动跳过，不影响其它打开方式。
+    -->
+    <Reference Include="System.Management" />
+  </ItemGroup>
+
+</Project>

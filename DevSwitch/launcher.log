@@ -1,0 +1,35 @@
+﻿2026-11-18 12:10:33.550  ───── launcher start ─────
+2026-11-18 12:10:33.550  log path=E:\学习项目\dev-switch\DevSwitch\launcher.log
+2026-11-18 12:10:33.553  start node=C:\Users\admin\.workbuddy\binaries\node\versions\22.22.2-6\node.exe script=E:\学习项目\dev-switch\server.js port=4599
+2026-11-18 12:10:33.569  node started pid=53976
+2026-11-18 12:10:34.116  port 4599 listening=True
+2026-11-18 12:10:34.123  scan: topWindows=695 titled=18 titleHit=0 found=0
+2026-11-18 12:10:34.123  panel windows before=0
+2026-11-18 12:10:34.124  no panel window yet, opening a new one
+2026-11-18 12:10:34.126  default browser progid=ChromeHTML
+2026-11-18 12:10:34.217  ForceNewWindow: no running --user-data-dir found, using default profile
+2026-11-18 12:10:34.224  force new window via C:\Program Files\Google\Chrome\Application\chrome.exe arg=--new-window "http://127.0.0.1:4599/"
+2026-11-18 12:10:34.224  force new window opened=True
+2026-11-18 12:10:37.036  scan: topWindows=696 titled=18 titleHit=0 found=0
+2026-11-18 12:10:37.194  scan: topWindows=695 titled=18 titleHit=0 found=0
+2026-11-18 12:10:42.335  fallback to shell open
+2026-11-18 12:10:42.398  shell open ok pid=39604
+2026-11-18 12:10:48.468  browser open FAILED - no panel window at all
+2026-11-18 12:10:49.574  node exited code=143
+2026-11-18 14:07:45.739  ───── launcher start ─────
+2026-11-18 14:07:45.739  log path=E:\学习项目\dev-switch\DevSwitch\launcher.log
+2026-11-18 14:07:45.742  start node=C:\Users\admin\AppData\Local\Author Software\nvm\\.nodejs\node.exe script=E:\学习项目\dev-switch\server.js port=4599
+2026-11-18 14:07:45.820  node started pid=35956
+2026-11-18 14:07:46.897  port 4599 listening=True
+2026-11-18 14:07:46.902  scan: topWindows=704 titled=20 titleHit=0 found=0
+2026-11-18 14:07:46.902  panel windows before=0
+2026-11-18 14:07:46.955  CDP: probe found live debug port 9222
+2026-11-18 14:07:46.955  CDP: using debug port 9222
+2026-11-18 14:07:46.957  CDP: found existing panel target B063DE984731B2EDA82EB9F24A0EFF00, activating
+2026-11-18 14:07:46.965  CDP: activate existing = True
+2026-11-18 14:07:47.003  CDP: refreshed panel (new opened, old B063DE984731B2EDA82EB9F24A0EFF00 closed=True)
+2026-11-18 14:07:47.003  open via CDP=True
+2026-11-18 14:07:47.257  scan: topWindows=704 titled=20 titleHit=1 found=1
+2026-11-18 14:07:47.258  CDP panel tab live in window hwnd=3937952
+2026-11-18 14:07:47.261  fg via SetForegroundWindow
+2026-11-18 14:07:47.262  panel hwnd=3937952 new=False foreground=True

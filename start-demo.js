@@ -52,7 +52,13 @@ function writeDemoState() {
 }
 
 function run(script, label, extraEnv) {
-  const p = spawn(process.execPath, [path.join(cwd, script)], {
+  // 把 --no-browser 透传给子进程：演示版由启动器负责开浏览器，
+  // 子进程再开一次就会多出两个标签页。直接 `node start-demo.js` 时
+  // 本来也不开浏览器（OPEN_BROWSER 未设），所以透传不改变原有行为。
+  const argv = [path.join(cwd, script)];
+  if (process.argv.includes('--no-browser')) argv.push('--no-browser');
+
+  const p = spawn(process.execPath, argv, {
     cwd,
     stdio: 'inherit',
     env: { ...process.env, MOCK_PORT: String(MOCK_PORT), ...extraEnv },

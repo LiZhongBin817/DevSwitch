@@ -56,10 +56,12 @@ html, body {
 .brand-mark {
   width: 30px; height: 30px;
   display: grid; place-items: center;
+  /* 底色和图形都由内联 SVG 自己画，这里只负责对齐和圆角裁切 */
   border-radius: 8px;
-  background: linear-gradient(135deg, #2f6bff, #5b8cff);
-  color: #fff; font-weight: 700; font-size: 12px; letter-spacing: .5px;
+  overflow: hidden;
+  flex: 0 0 auto;
 }
+.brand-mark svg { display: block; }
 .brand-text { display: flex; flex-direction: column; line-height: 1.25; }
 .brand-text strong { font-size: 13px; }
 .brand-text span { font-size: 11px; color: var(--text-3); }

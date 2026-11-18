@@ -34,6 +34,23 @@ const PORT = Number(process.env.PORT || 4599);
 const HOST = process.env.HOST || '127.0.0.1';
 const BODY_LIMIT = 8 * 1024 * 1024;
 
+/**
+ * 启动时要不要自己打开浏览器。
+ *
+ * 三种情况不开：
+ *  1. 没设 OPEN_BROWSER=1 —— 手敲 node server.js 时不该抢焦点，
+ *     你可能正在远程/服务里跑。
+ *  2. 带了 --no-browser —— DevSwitch.exe 用这种方式明确说「浏览器我来开」。
+ *     它用命令行参数而不是环境变量传，因为 Windows 上同时存在
+ *     HTTPS_PROXY / https_proxy 这类大小写重复键时，.NET 的
+ *     ProcessStartInfo.EnvironmentVariables 一读就抛异常，
+ *     会让启动器在拉起 node 之前就崩掉（踩过，见 launcher/Program.cs 的注释）。
+ *
+ * 为什么不让 exe 和 node 各开一次：会开出两个标签页，用户以为点重了。
+ */
+const OPEN_BROWSER_OFF =
+  process.argv.includes('--no-browser') || process.env.OPEN_BROWSER !== '1';
+
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -805,6 +822,19 @@ const requestHandler = async (req, res) => {
       }
     }
 
+    // 浏览器「真的打开了」的探针。
+    //
+    // 打开浏览器这个动作在本机是没有回执的：cmd /c start 一律返回 0，
+    // 哪怕 URL 根本没人接管（实测 start 打开一个不存在的协议也是 exit=0）。
+    // 所以不能拿退出码当成功判据，只能靠「浏览器有没有回来请求」来确认 ——
+    // 于是让它先请求 /__open，这个地址被请求到就说明浏览器确实起来了。
+    // 随后 302 回首页，用户地址栏里看到的仍是干净的 /，不会留下奇怪参数。
+    if (pathname === '/__open') {
+      markBrowserOpened();
+      res.writeHead(302, { Location: '/' });
+      return res.end();
+    }
+
     // 静态资源
     if (req.method === 'GET' || req.method === 'HEAD') {
       let rel = pathname === '/' ? '/index.html' : pathname;
@@ -854,29 +884,326 @@ function panelUrl(host) {
   return `http://${host.includes(':') ? `[${host}]` : host}:${PORT}`;
 }
 
+/** 浏览器是否已经回来请求过 /__open —— 用来确认「真的打开了」。 */
+let browserOpened = false;
+let browserOpenedAt = 0;
+function markBrowserOpened() {
+  if (browserOpened) return;
+  browserOpened = true;
+  browserOpenedAt = Date.now();
+}
+
 /**
  * 用系统默认浏览器打开面板。
  *
- * 只在 OPEN_BROWSER=1 时调用（由 DevSwitch.bat 设置），命令行手敲 node server.js
- * 不会弹浏览器 —— 你可能正在远程/服务里跑，不想被抢焦点。
+ * 只在 `.bat` / 手写 `OPEN_BROWSER=1 node server.js` 时走这里。
+ * **双击 DevSwitch.exe 不走这里** —— 由启动器自己用 ShellExecute 打开，
+ * 原因见 launcher/Program.cs 顶部注释（.NET 读环境变量会炸的那个坑）。
+ *
+ * 命令行手敲 node server.js 不会弹浏览器 —— 你可能正在远程/服务里跑，不想被抢焦点。
  * 不引第三方包，用各平台自带的命令。
+ *
+ * 为什么写得这么啰嗦：
+ *  「打开浏览器」是本工具唯一一个**本机没有回执**的动作。cmd /c start 无论成功失败
+ * 都返回 0（实测连不存在的协议也是 0），所以老写法「spawn 一下、错误全吞」的问题是：
+ * 打不开时它照样打印「已在浏览器中打开」，用户看到一句假话，然后什么都没发生，
+ * 而代码里也没有任何线索可查。
+ *
+ * 现在的判据（重要，改过两轮）：
+ *  1. 依次尝试多种打开方式，前一种没发起进程（ENOENT 等）就换下一种；
+ *  2. 判成功用**浏览器进程数有没有增加**，探针只作加分项 ——
+ *     曾经把「探针没回访」当失败，结果机器上浏览器明明开了却报「没能打开」，
+ *     因为本机有 HTTP_PROXY，浏览器请求被接管，探针根本回不来；
+ *  3. 真没发起任何进程才算失败，并给出可点的地址。
+ *
+ * @param {string} url 要打开的面板地址
+ * @param {boolean} canVerify 本进程能不能观测到浏览器的回访。
+ *   首次启动时为 true（浏览器访问的就是本进程）。
+ *   复用已有实例时为 false —— 浏览器会去请求那个**已经在运行**的旧面板，
+ *   请求根本不经过本进程，在这里等永远是白等，不能拿它当失败证据。
  */
-function openPanelInBrowser(url) {
+async function openPanelInBrowser(url, canVerify = true) {
   const target = url || panelUrl(liveHosts.includes(HOST) ? HOST : liveHosts[0] || HOST);
-  const [cmd, argv] =
-    process.platform === 'win32'
-      ? ['cmd', ['/c', 'start', '', target]]
-      : process.platform === 'darwin'
-        ? ['open', [target]]
-        : ['xdg-open', [target]];
 
-  try {
-    const p = spawn(cmd, argv, { stdio: 'ignore', detached: true });
-    p.on('error', () => {});
-    p.unref();
-  } catch {
-    // 打不开就算了，控制台里已经打印了地址，手动点一样
+  // 先打这个地址，浏览器落地后再跳到首页。
+  // 目的：让「有没有打开」变成可观测的 —— 见 markBrowserOpened 的注释。
+  const probe = target.replace(/\/+$/, '') + '/__open';
+
+  /** 各平台可用的打开方式，按可靠性排序。 */
+  const candidates =
+    process.platform === 'win32'
+      ? windowsOpenCandidates(probe)
+      : process.platform === 'darwin'
+        ? [{ cmd: 'open', argv: [probe] }]
+        : [
+            { cmd: 'xdg-open', argv: [probe] },
+            { cmd: 'gio', argv: ['open', probe] },
+          ];
+
+  let spawnedBy = null;
+
+  // 判据分两层，这是这段代码最重要的一次修正：
+  //
+  //   曾经的做法：等 /__open 探针回访，等不到就判「没能打开」。
+  //   实测发现这是**错的**：DevSwitch.exe 启动时浏览器进程数确实 +1
+  //   （31 → 32，浏览器真的开了），但探针就是没回访，
+  //   于是日志打出「⚠ 没能自动打开浏览器」—— 明明是开了。
+  //
+  //   为什么探针会不回访？本机配了 HTTP_PROXY=http://127.0.0.1:55152，
+  //   浏览器/安全软件可能把请求接管了；也可能只是冷启动慢于等待窗口。
+  //   探针本来是「防止假装成功」的手段，结果变成了「谎报失败」的手段。
+  //
+  // 所以改成：
+  //   1. 发出命令后看**浏览器进程数有没有增加** —— 这才是「开了」的硬证据；
+  //   2. 探针回访退化成加分项：回来了就说「已在浏览器中打开」，
+  //      没回来但进程增了就说「已打开（页面可能还在加载）」；
+  //   3. 进程也没增、命令也没发出去，才算真失败。
+  const before = countBrowserProcs();
+
+  for (let i = 0; i < candidates.length; i++) {
+    const c = candidates[i];
+    const ok = await spawnDetached(c.cmd, c.argv, !canVerify);
+    if (!ok) continue; // 这条命令根本没跑起来（ENOENT 等），换下一种
+    spawnedBy = c.label || c.cmd;
+
+    if (!canVerify) break; // 复用分支无从验证，直接认
+
+    // 快窗口：已常驻的浏览器会立刻回访；冷启动的浏览器进程会先起来。
+    // 两个信号任一出现就算成功，不必等另一个。
+    const hit = await waitFor(
+      () => browserOpened || countBrowserProcs() > before,
+      6000,
+    );
+    if (hit) break;
   }
+
+  if (!spawnedBy) {
+    // 一个候选都没能发起进程 —— 这是真失败，如实说。
+    console.log('');
+    console.log('  ⚠ 没能自动打开浏览器');
+    console.log(`    请手动打开：${target}`);
+    return false;
+  }
+
+  if (!canVerify) {
+    console.log('  → 已请求系统打开浏览器（面板在已运行的实例里，直接过去用就行）');
+    return true;
+  }
+
+  if (browserOpened) {
+    console.log(`  ✓ 已在浏览器中打开（${spawnedBy}）`);
+  } else if (countBrowserProcs() > before) {
+    // 进程起来了但页面还没连回来 —— 正常，冷启动正在加载。
+    console.log(`  ✓ 已打开浏览器（${spawnedBy}），页面正在加载…`);
+  } else {
+    // 命令发出去了、进程却没增。可能是浏览器复用了已有实例开标签页
+    // （那种情况进程数本来就不会变），所以也不能断言失败。
+    console.log(`  → 已用 ${spawnedBy} 打开面板`);
+    console.log(`    没看到页面就手动打开：${target}`);
+  }
+  return true;
+}
+
+/**
+ * 数一下当前有几个浏览器进程。
+ *
+ * 用途：判断「打开浏览器」这个动作到底有没有生效。
+ * 这是比探针更硬的证据 —— 探针依赖网络，会被代理/插件拦截；
+ * 进程数不会，它只反映「有没有真的把浏览器拉起来」。
+ *
+ * 注意一个已知局限：浏览器**已经开着**时，打开新标签页不会新增进程，
+ * 所以「进程数没变」不等于「没打开」。调用方必须把这一点考虑进去 ——
+ * 这也是为什么上面失败分支只说「没看到页面就手动打开」，而不说「失败了」。
+ *
+ * 用 tasklist 而不是读 /proc：Windows 上这是最省事的办法，且不引依赖。
+ * 任何异常都返回 -1，让调用方当作「不知道」，绝不因此打断启动流程。
+ */
+function countBrowserProcs() {
+  if (process.platform !== 'win32') return -1;
+  try {
+    const { execFileSync } = require('child_process');
+    const out = execFileSync(
+      'tasklist',
+      ['/FI', 'IMAGENAME eq chrome.exe', '/FI', 'IMAGENAME eq msedge.exe', '/FI', 'IMAGENAME eq firefox.exe', '/NH'],
+      { encoding: 'utf8', timeout: 2500, windowsHide: true, stdio: 'pipe' },
+    );
+    // tasklist 多个 /FI IMAGENAME 之间是 AND 关系，等于啥都筛不出来。
+    // 所以逐个查，别嫌麻烦 —— 正确性优先。
+    let n = 0;
+    for (const exe of ['chrome.exe', 'msedge.exe', 'firefox.exe', 'brave.exe', '360chrome.exe']) {
+      try {
+        const o = execFileSync('tasklist', ['/FI', `IMAGENAME eq ${exe}`, '/NH'], {
+          encoding: 'utf8', timeout: 2500, windowsHide: true, stdio: 'pipe',
+        });
+        n += (o.match(new RegExp(exe.replace('.', '\\.'), 'gi')) || []).length;
+      } catch {
+        // 单个查不到就算了
+      }
+    }
+    return n;
+  } catch {
+    return -1;
+  }
+}
+
+/**
+ * Windows 上「打开浏览器」的候选方式，按可靠性从高到低。
+ *
+ * 为什么不再把 `cmd /c start "" <url>` 放在第一位：
+ * 它是走 shell 协议关联的，中间隔着 ProgId → 注册表 → 浏览器，
+ * 任何一环有问题（关联被改坏、安全软件拦截、shell 扩展异常）都会
+ * **静默什么都不做**，而且照样返回 0。用户那边看到的就是「没反应」，
+ * 我这边也拿不到任何错误 —— 这个坑我们踩过一次。
+ *
+ * 现在优先直接启动浏览器自己的 exe：路径是确定的，成没成一眼能看出来。
+ * cmd / start 只留作最后兜底（比如用户装了别的默认浏览器）。
+ *
+ * 顺序不是乱排的：**先用注册表问出「用户的默认浏览器是哪个」**，
+ * 再直接启动那个 exe。这样既尊重用户的选择（不会因为本机装了 Chrome
+ * 就绕过他设的 Edge），又避开了协议关联这条会静默失败的链路。
+ */
+function windowsOpenCandidates(probe) {
+  const list = [];
+  const seen = new Set();
+
+  const push = (exe, label) => {
+    if (!exe) return;
+    const key = exe.toLowerCase();
+    if (seen.has(key)) return;
+    try {
+      if (!fs.existsSync(exe)) return;
+    } catch {
+      return;
+    }
+    seen.add(key);
+    list.push({ cmd: exe, argv: [probe], label });
+  };
+
+  // 1. 用户的默认浏览器（注册表 UserChoice 里的 ProgId → 对应 exe）
+  push(defaultBrowserExe(), '默认浏览器');
+
+  // 2. 万一注册表那步拿不到（权限/格式变化），退回按常见路径猜。
+  //    这些只是候选，装没装用 existsSync 判断，不会误报。
+  const browsers = [
+    ['Chrome', process.env.PROGRAMFILES, 'Google\\Chrome\\Application\\chrome.exe'],
+    ['Chrome', process.env['PROGRAMFILES(X86)'], 'Google\\Chrome\\Application\\chrome.exe'],
+    ['Chrome', process.env.LOCALAPPDATA, 'Google\\Chrome\\Application\\chrome.exe'],
+    ['Edge', process.env['PROGRAMFILES(X86)'], 'Microsoft\\Edge\\Application\\msedge.exe'],
+    ['Edge', process.env.PROGRAMFILES, 'Microsoft\\Edge\\Application\\msedge.exe'],
+    ['Firefox', process.env.PROGRAMFILES, 'Mozilla Firefox\\firefox.exe'],
+    ['Firefox', process.env['PROGRAMFILES(X86)'], 'Mozilla Firefox\\firefox.exe'],
+    ['Brave', process.env.PROGRAMFILES, 'BraveSoftware\\Brave-Browser\\Application\\brave.exe'],
+    ['360 极速', process.env.LOCALAPPDATA, '360Chrome\\Chrome\\Application\\360chrome.exe'],
+  ];
+  for (const [label, base, rest] of browsers) {
+    if (base) push(path.join(base, rest), label);
+  }
+
+  // 3. 兜底 1：explorer 打开 URL。
+  //    实测这条在 Windows 上很稳 —— explorer 会把 URL 交给默认浏览器，
+  //    而且它本来就常驻，不需要新起进程，冷启动路径最短。
+  list.push({ cmd: 'explorer.exe', argv: [probe], label: 'explorer' });
+  // 4. 兜底 2：交给 URL 协议处理器（不依赖 cmd 的解析）
+  list.push({ cmd: 'rundll32', argv: ['url.dll,FileProtocolHandler', probe], label: 'rundll32' });
+  // 5. 兜底 3：传统 start。"" 是窗口标题占位，少了它 URL 会被当成标题。
+  list.push({ cmd: 'cmd', argv: ['/c', 'start', '', probe], label: 'cmd start' });
+
+  return list;
+}
+
+/**
+ * 从注册表问出默认浏览器的 exe 路径。
+ *
+ * 两级查：
+ *   HKCU\...\UrlAssociations\http\UserChoice  → ProgId（比如 ChromeHTML）
+ *   HKCR\<ProgId>\shell\open\command           → 命令行，抠出 exe 路径
+ * 拿不到就返回 null，让调用方退回按路径猜。
+ *
+ * 用 reg.exe 而不是读写注册表 API：零依赖，且 Node 里没有内置的注册表接口。
+ * 失败一律当「不知道」，不抛错 —— 这函数只是锦上添花，不能拖垮启动流程。
+ */
+function defaultBrowserExe() {
+  try {
+    const { execFileSync } = require('child_process');
+
+    const q = execFileSync('reg', ['query', 'HKCU\\SOFTWARE\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\http\\UserChoice', '/v', 'ProgId'], {
+      encoding: 'utf8',
+      stdio: 'pipe',
+      timeout: 3000,
+      windowsHide: true,
+    });
+    const m = q.match(/ProgId\s+REG_SZ\s+(\S+)/i);
+    if (!m) return null;
+    const progId = m[1].trim();
+
+    const cmdOut = execFileSync('reg', ['query', `HKCR\\${progId}\\shell\\open\\command`, '/ve'], {
+      encoding: 'utf8',
+      stdio: 'pipe',
+      timeout: 3000,
+      windowsHide: true,
+    });
+    // 命令行形如 "C:\...\chrome.exe" --single-argument %1
+    const em = cmdOut.match(/"([^"]+\.exe)"/i) || cmdOut.match(/([A-Za-z]:\\[^\s"]+\.exe)/i);
+    if (!em) return null;
+
+    // %1 / --single-argument 之类不参与判断，只取 exe 本身
+    return em[1];
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * spawn 一个子进程。同步抛错或 emit error 都算失败。
+ *
+ * @param {boolean} detach 是否让子进程脱离父进程独立存活。
+ *   **首次启动传 false**：父进程本来就要长期跑着，子进程不需要独立，
+ *   而且实测「detached + 浏览器 exe」在某些环境下会静默不生效 ——
+ *   进程创建成功、不报错、浏览器就是不出来。
+ *   **复用分支传 true**：那边启动完 200ms 就 process.exit，
+ *   不脱离的话浏览器会被一起带走。
+ */
+function spawnDetached(cmd, argv, detach = false) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (v) => {
+      if (settled) return;
+      settled = true;
+      resolve(v);
+    };
+    try {
+      const p = spawn(cmd, argv, {
+        stdio: 'ignore',
+        detached: !!detach,
+        // 别让 cmd / rundll32 闪一个黑框出来
+        windowsHide: true,
+      });
+      p.on('error', (e) => {
+        // 只有「命令根本没跑起来」才算失败（ENOENT 等）。
+        // 注意不能用退出码判断 —— cmd /c start 永远返回 0。
+        console.log(`  · 用 ${cmd} 打开失败：${e.code || e.message}`);
+        done(false);
+      });
+      if (detach) p.unref();
+      // 没有 error 就当它成功发起了
+      setTimeout(() => done(true), 150);
+    } catch (e) {
+      console.log(`  · 用 ${cmd} 打开失败：${e.message}`);
+      done(false);
+    }
+  });
+}
+
+/** 轮询等某个条件成立，最多等 ms 毫秒。 */
+function waitFor(fn, ms) {  return new Promise((resolve) => {
+    const t0 = Date.now();
+    const tick = () => {
+      if (fn()) return resolve(true);
+      if (Date.now() - t0 >= ms) return resolve(false);
+      setTimeout(tick, 100);
+    };
+    tick();
+  });
 }
 
 /**
@@ -895,15 +1222,25 @@ async function handleAlreadyRunning() {
     console.log('');
     console.log(`  ✓ 面板已经在运行了（端口 ${PORT} 被占用，占用的就是本工具）`);
     console.log(`  面板地址   ${url}`);
-    if (process.env.OPEN_BROWSER === '1') {
-      console.log('  → 已在浏览器中打开，直接过去用就行');
-      openPanelInBrowser(url);
-      // 给浏览器一点时间接管，然后把这次多起的进程退掉。
-      // 用 2 这个专用退出码告诉 DevSwitch.bat「是复用已有实例，不是出错」，
-      // 脚本据此直接关窗口，不再让人按一次键。
-      setTimeout(() => process.exit(EXIT_ALREADY_RUNNING), 400);
-      return;
+    // 浏览器不开的情况（DevSwitch.exe 带 --no-browser 启动）：
+    // 直接退 2，由启动器负责把页面打开 —— 它那边能可靠地观察到端口已在服务，
+    // 用 ShellExecute 打开也不会受这里进程即将退出的影响。
+    if (OPEN_BROWSER_OFF) {
+      console.log('  （页面由启动器打开）');
+      process.exit(EXIT_ALREADY_RUNNING);
     }
+
+    // 注意顺序：先等确认，再打印结论。
+    // 老代码是「先打印『已在浏览器中打开』，再去开」，开没开成都会说成功 ——
+    // 打不开时用户得到的是一句假话，也留不下任何线索。
+    // 第二个参数 false：面板跑在**另一个**进程里，浏览器不会回访本进程，
+    // 在这里等 /__open 永远等不到，不能用它判定失败。
+    await openPanelInBrowser(url, false);
+    // 给浏览器一点时间接管，然后把这次多起的进程退掉。
+    // 用 2 这个专用退出码告诉启动器「是复用已有实例，不是出错」，
+    // 脚本据此直接关窗口，不再让人按一次键。
+    setTimeout(() => process.exit(EXIT_ALREADY_RUNNING), 200);
+    return;
     console.log('  （想强制重启：先关掉之前那个窗口，再运行一次）');
     process.exit(EXIT_ALREADY_RUNNING);
   }
@@ -1044,9 +1381,10 @@ LISTEN_HOSTS.forEach((bindHost) => {
     console.log('  Ctrl+C 退出');
     console.log('');
 
-    // 双击 DevSwitch.bat 时会带上 OPEN_BROWSER=1。
-    // 必须等真正 listen 成功之后才开浏览器 —— 否则用户第一眼看到的是
-    // 「无法访问此网站」，得手动刷新一次才知道其实起来了。
-    if (process.env.OPEN_BROWSER === '1') openPanelInBrowser(panelUrl(panelHost));
+    // 双击 DevSwitch.exe 时，浏览器由 exe 自己打开，这里不重复开。
+    // 直接 node server.js（OPEN_BROWSER=1）时才走这条。
+    if (!OPEN_BROWSER_OFF) {
+      openPanelInBrowser(panelUrl(panelHost)).catch(() => {});
+    }
   });
 });

@@ -3,5 +3,9 @@
 # 真实配置里有明文账号密码，绝不能提交
 data/state.json
 
-# 演示模式的独立配置目录（跑 DevSwitch-Demo.bat 会生成）
+# 演示模式的独立配置目录（跑演示版会生成）
 data-demo/
+
+# exe 编译中间产物
+launcher/bin/
+launcher/obj/

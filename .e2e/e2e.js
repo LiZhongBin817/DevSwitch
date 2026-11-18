@@ -165,6 +165,32 @@ function rpc(ws) {
 
     /* ---------- 1. 面板与后端都在线 ---------- */
     check('面板已加载', await evalJs('document.title.includes("DevSwitch")'));
+
+    // 图标：标签页图标的 href 必须指向真实存在的文件，且返回 SVG。
+    // 单独加这条是因为图标链接坏掉时页面照常能用，肉眼在无头浏览器里也看不出来，
+    // 但标签页会退化成默认空白页图标 —— 这种"静默退化"很容易漏。
+    const iconHref = await evalJs('(document.querySelector("link[rel=\\"icon\\"]")||{}).getAttribute?.("href")||""');
+    check('标签页图标指向 icon.svg', String(iconHref).includes('icon.svg'), String(iconHref));
+
+    const iconRes = await fetch(`http://127.0.0.1:${PANEL_PORT}/icon.svg`).catch(() => null);
+    const iconType = iconRes ? iconRes.headers.get('content-type') || '' : '';
+    const iconBody = iconRes && iconRes.ok ? await iconRes.text() : '';
+    check('icon.svg 可访问且是 SVG', !!iconRes && iconRes.ok && iconType.includes('svg'),
+      `${iconRes ? iconRes.status : '请求失败'} / ${iconType}`);
+    // 真正的图形得在文件里，不能是空壳。
+    // 图标方案是「渐变圆角方块 + 白色粗体 DS」，所以这里查的是方块底 + DS 字样；
+    // 早先做双向箭头时查的是 <path>，换方案时这条必须跟着改，
+    // 否则测试会一直红，然后被人当噪音删掉 —— 那就等于没有这条测试了。
+    check('icon.svg 里有实际图形（底色方块 + DS 字样）',
+      /<rect[^>]*fill="url\(/.test(iconBody) && />\s*DS\s*<\/text>/.test(iconBody),
+      `${iconBody.length} 字节`);
+
+    // 顶栏和标签页必须长得一样。这里直接读渲染后的文字，而不是查源码字符串，
+    // 因为 svg <text> 只有真渲染出来才有 textContent。
+    const brandMarkText = await evalJs('(document.querySelector(".brand-mark svg text")||{}).textContent||""');
+    check('顶栏图标与标签页图标同一套设计（内联 SVG 里的 DS 字样）',
+      brandMarkText.trim() === 'DS',
+      brandMarkText.trim() || '(无文本)');
     const pingText = await evalJs('(document.querySelector("#pingState")||{}).textContent||""');
     check('探测文案显示在线', /在线/.test(pingText), pingText.trim());
 

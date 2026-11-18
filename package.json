@@ -8,7 +8,18 @@
     "start": "node server.js",
     "dev": "node server.js",
     "mock": "node mock-backend.js",
-    "demo": "node start-demo.js"
+    "demo": "node start-demo.js",
+
+    "icon": "node tools/build-ico.js",
+    "install": "node tools/install-icon.js",
+    "exe": "node tools/build-exe.js",
+
+    "icon:clear": "node tools/clear-icon-cache.js",
+    "icon:diagnose": "node tools/diagnose-icon.js",
+
+    "verify:icon": "node tools/verify-icon.js",
+    "verify:exe": "node tools/verify-exe-icon.js",
+    "verify:lnk": "node tools/dump-lnk-full.js DevSwitch.lnk"
   },
   "engines": {
     "node": ">=18"
