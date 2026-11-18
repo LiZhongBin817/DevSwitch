@@ -487,6 +487,77 @@ hr { border: none; border-top: 1px solid var(--line); margin: 12px 0; }
 /* 带可搜索下拉的弹窗宽一点：租户全名能显示完，不用靠省略号猜 */
 .modal.modal-wide { width: min(520px, 94vw); }
 
+/* -------------------- 前缀探测结果 -------------------- */
+.probe-table {
+  width: 100%; border-collapse: collapse; margin-bottom: 10px;
+  font-size: 12px;
+}
+.probe-table th {
+  text-align: left; font-weight: 500; color: var(--text-3);
+  padding: 3px 10px 3px 0; white-space: nowrap; width: 1%;
+}
+.probe-table td { padding: 3px 0; word-break: break-all; }
+.probe-table code {
+  font-family: var(--mono); font-size: 12px; color: var(--text);
+  background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: 4px; padding: 1px 5px;
+}
+
+/* 证据段落：颜色本身就是结论，别让用户再去读文字判断成败 */
+.probe-ev {
+  margin: 0 0 8px; padding: 8px 10px; border-radius: var(--radius-sm);
+  font-size: 12px; line-height: 1.6;
+}
+.probe-ev code {
+  font-family: var(--mono); font-size: 11.5px;
+  background: rgba(255, 255, 255, .72); border-radius: 3px; padding: 1px 4px;
+}
+.probe-ev.ok { background: var(--ok-soft); color: #10664a; }
+.probe-ev.warn { background: var(--warn-soft); color: #7d5106; }
+.probe-ev.bad { background: var(--danger-soft); color: #8c2b2b; }
+
+.probe-tried { font-size: 12px; color: var(--text-2); }
+.probe-tried summary {
+  cursor: pointer; color: var(--text-3); outline: none;
+  user-select: none; padding: 2px 0;
+}
+.probe-tried summary:hover { color: var(--text-2); }
+.probe-tried ul { margin: 6px 0 0; padding-left: 18px; }
+.probe-tried li { margin: 3px 0; line-height: 1.7; }
+.probe-tried li code {
+  font-family: var(--mono); font-size: 11.5px;
+  background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: 4px; padding: 0 4px;
+}
+.probe-tried li em { color: var(--text-3); font-style: normal; margin-left: 4px; }
+
+/* 手动验证前缀：内置候选表猜不到时，用户自己填一个来验 */
+.probe-manual {
+  margin: 12px 0 4px;
+  padding: 10px 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+.probe-manual > label {
+  display: block;
+  font-size: 12px; color: var(--text-2); margin-bottom: 6px;
+}
+.probe-manual-row { display: flex; gap: 6px; align-items: center; }
+.probe-manual-row input {
+  flex: 1 1 auto; min-width: 0;
+  font-family: var(--mono); font-size: 12.5px;
+  padding: 5px 8px;
+  border: 1px solid var(--line-strong); border-radius: var(--radius-sm);
+  background: #fff; color: var(--text);
+  outline: none;
+}
+.probe-manual-row input:focus { border-color: var(--accent); }
+.probe-manual-row .btn { flex: 0 0 auto; }
+.probe-manual-hint {
+  margin: 6px 0 0; font-size: 11.5px; color: var(--text-3); line-height: 1.6;
+}
+
 /* -------------------- 可搜索下拉（组合里的租户） -------------------- */
 .ss { position: relative; }
 .ss-input { width: 100%; }

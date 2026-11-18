@@ -33,3 +33,34 @@
 2026-11-18 14:07:47.258  CDP panel tab live in window hwnd=3937952
 2026-11-18 14:07:47.261  fg via SetForegroundWindow
 2026-11-18 14:07:47.262  panel hwnd=3937952 new=False foreground=True
+2026-11-18 14:29:33.301  ───── launcher start ─────
+2026-11-18 14:29:33.302  log path=E:\学习项目\dev-switch\DevSwitch\launcher.log
+2026-11-18 14:29:33.304  start node=C:\Users\admin\AppData\Local\Author Software\nvm\\.nodejs\node.exe script=E:\学习项目\dev-switch\server.js port=4599
+2026-11-18 14:29:33.317  node started pid=11412
+2026-11-18 14:29:33.868  port 4599 listening=True
+2026-11-18 14:29:33.874  scan: topWindows=701 titled=17 titleHit=0 found=0
+2026-11-18 14:29:33.874  panel windows before=0
+2026-11-18 14:29:33.953  CDP: probe found live debug port 9222
+2026-11-18 14:29:33.954  CDP: using debug port 9222
+2026-11-18 14:29:34.003  CDP: new tab created = True
+2026-11-18 14:29:34.003  open via CDP=True
+2026-11-18 14:29:34.256  scan: topWindows=701 titled=17 titleHit=1 found=1
+2026-11-18 14:29:34.256  CDP panel tab live in window hwnd=20387272
+2026-11-18 14:29:34.260  fg via SetForegroundWindow
+2026-11-18 14:29:34.261  panel hwnd=20387272 new=False foreground=True
+2026-11-18 15:39:51.486  ───── launcher start ─────
+2026-11-18 15:39:51.486  log path=E:\学习项目\dev-switch\DevSwitch\launcher.log
+2026-11-18 15:39:51.489  start node=C:\Users\admin\AppData\Local\Author Software\nvm\\.nodejs\node.exe script=E:\学习项目\dev-switch\server.js port=4599
+2026-11-18 15:39:51.500  node started pid=57240
+2026-11-18 15:39:52.048  port 4599 listening=True
+2026-11-18 15:39:52.054  scan: topWindows=723 titled=19 titleHit=0 found=0
+2026-11-18 15:39:52.054  panel windows before=0
+2026-11-18 15:39:52.162  CDP: probe found live debug port 9222
+2026-11-18 15:39:52.163  CDP: using debug port 9222
+2026-11-18 15:39:52.260  CDP: new tab created = True
+2026-11-18 15:39:52.260  open via CDP=True
+2026-11-18 15:39:52.518  scan: topWindows=723 titled=18 titleHit=1 found=1
+2026-11-18 15:39:52.518  CDP panel tab live in window hwnd=20387272
+2026-11-18 15:39:52.523  foreground ok round=1
+2026-11-18 15:39:52.524  panel hwnd=20387272 new=False foreground=True
+2026-11-18 15:52:21.135  node exited code=255

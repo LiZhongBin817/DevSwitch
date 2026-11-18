@@ -40,6 +40,7 @@
       <input id="targetInput" type="text" spellcheck="false" placeholder="http://localhost:8080"
              title="填 localhost 最稳：它会同时尝试 IPv6(::1) 与 IPv4(127.0.0.1)。127.0.0.1 只认 IPv4，遇到只绑 IPv6 的后端会连不上（面板会自动兜底换名）。">
       <button id="pingBtn" class="btn btn-ghost" title="请求后端根路径，检测是否在线">检测</button>
+      <button id="probePrefixBtn" class="btn btn-ghost" title="自动试探 context-path 前缀（/report、/pds-std…），查出正确的登录路径">探测前缀</button>
     </div>
     <div id="pingState" class="ping"><i class="dot"></i><span>未检测</span></div>
   </div>

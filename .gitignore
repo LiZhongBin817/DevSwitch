@@ -2,6 +2,8 @@
 
 # 真实配置里有明文账号密码，绝不能提交
 data/state.json
+# 改配置时自动留的备份同样含明文，一并排除
+data/state.json.bak*
 
 # 演示模式的独立配置目录（跑演示版会生成）
 data-demo/

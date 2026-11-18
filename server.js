@@ -71,15 +71,19 @@ const HOP_BY_HOP = new Set([
 ]);
 
 const DEFAULT_STATE = {
-  target: 'http://127.0.0.1:8080',
+  target: 'http://127.0.0.1:8083',
   requestTimeoutMs: 30000,
   // 后端主机名写 localhost / 127.0.0.1 连不上时，自动换另一个再试一次。
   // 本机同时跑着只绑 IPv4 和只绑 IPv6 的后端是常态，关掉它就得手工改地址。
   autoLoopback: true,
+  // 探测前缀时假设的 dispatcher 映射段（spring.mvc.servlet.path）。
+  // tsie 体系的项目都是 /api；SERVLET_PATH 换成别的值时，这里跟着改。
+  mvcPath: '/api',
   login: {
     enabled: true,
     method: 'POST',
-    path: '/pds-std/api/login',
+    // pps-report（报表服务）的登录接口：context-path=/report + dispatcher=/api
+    path: '/report/api/login',
     contentType: 'json',
     bodyTemplate: '{\n  "username": "{{username}}",\n  "password": "{{password}}"\n}',
     tokenSource: 'cookie',
@@ -93,7 +97,7 @@ const DEFAULT_STATE = {
   tenantSwitch: {
     enabled: true,
     method: 'POST',
-    path: '/pds-std/api/switchTenant',
+    path: '/report/api/switchTenant',
     contentType: 'form',
     bodyTemplate: '{\n  "tenantId": "{{tenantId}}"\n}',
     successPath: 'retCode',
@@ -103,7 +107,7 @@ const DEFAULT_STATE = {
   tenantList: {
     enabled: true,
     method: 'GET',
-    path: '/pds-std/api/pf/tenant/all',
+    path: '/report/api/pf/tenant/all',
     listPath: 'data',
     idField: 'tenantId',
     nameField: 'name',
@@ -533,6 +537,345 @@ async function doProxy({ method = 'GET', url, headers = {}, body, timeoutMs, bas
   };
 }
 
+/* ---------------------- 前缀探测：猜 context-path ---------------------- */
+
+/**
+ * 为什么需要这个：Spring Boot 的真实地址 = server.servlet.context-path + spring.mvc.servlet.path，
+ * 而 context-path 是**部署期配置**（本项目里就是 WEB_PROJECT 环境变量），换一个服务就换一个值。
+ * 填错前缀的后果不是 401 而是 404 —— 请求根本没进应用，界面上看起来就像"登录失败"。
+ *
+ * 判定难点：这套 tsie 框架未登录时对**任意已进入应用的路径**都返回 HTTP 200 +
+ * {"retCode":"T302"}，所以"状态码 200"和"200 且是 JSON"都不足以证明前缀对。
+ * 反过来容器级 404 很有辨识度：Tomcat 自己的错误页带 Content-Language: en 且是 HTML。
+ *
+ * 于是判定规则是「排除法」：只要响应不是容器级 404，就说明上下文匹配上了，
+ * 请求已经交给了 Spring（后续是不是 T302/401 那是登录态的事，与前缀无关）。
+ */
+
+/** 探测用的哨兵段：正常业务不可能注册这个路径，命中只可能是兜底 handler */
+const PROBE_MARK = '__devswitch_probe__';
+
+/** Tomcat / Jetty 这类容器自己吐的 404，特征是 HTML 正文 + "HTTP Status 404" 标题 */
+function looksLikeContainer404(status, contentType, text) {
+  if (status !== 404) return false;
+  const ct = String(contentType || '').toLowerCase();
+  if (!ct.includes('html')) return false;
+  // 只认容器自己的错误页。
+  //
+  // 这里**故意不把** Spring Boot 的 "Whitelabel Error Page" 算进来：
+  // 那个页面只可能由应用自己产出，说明请求已经进了 Spring —— 恰恰证明前缀是对的。
+  // 早先把 whitelabel 一起当容器 404 排除掉，会让「没有 context-path 的服务」
+  // 永远探不出来（它的哨兵路径全都返回 whitelabel）。
+  return /HTTP Status 404/i.test(text || '');
+}
+
+/**
+ * 探一个候选前缀是否属于这个后端。
+ *
+ * 试两条路径，任一"进了应用"就算命中：
+ *   1) <prefix><mvc>/actuator/health  —— Spring Boot Actuator，命中会返回 {"status":"UP"}
+ *   2) <prefix><mvc>/<哨兵>            —— 随便一个不存在的段，只要不是容器 404 就说明前缀对
+ *
+ * 先试 health 是因为它免鉴权（tsie 的 ignored-urls 里就有），能拿到确凿的 UP；
+ * 但它需要 actuator 依赖，不是每个服务都有，所以还要有哨兵兜底。
+ */
+async function probeOnePrefix(base, prefix, mvcPath, timeoutMs = 5000) {
+  const pfx = prefix === '/' ? '' : String(prefix || '').replace(/\/+$/, '');
+  const mvc = mvcPath ? '/' + String(mvcPath).replace(/^\/+|\/+$/g, '') : '';
+  const urls = [
+    { kind: 'health', path: `${pfx}${mvc}/actuator/health` },
+    { kind: 'sentinel', path: `${pfx}${mvc}/${PROBE_MARK}` },
+  ];
+
+  // 试探过程中见过的「最像样的旁证」，全部都没命中时回报给界面，
+  // 用于解释「为什么判定没命中」，而不是干巴巴一个 false。
+  let loose = null;
+
+  for (const u of urls) {
+    const full = joinUrl(base, u.path);
+    try {
+      const r = await fetch(full, {
+        method: 'GET',
+        redirect: 'manual',
+        headers: { 'Accept-Encoding': 'identity' },
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      const text = await r.text();
+      const ct = r.headers.get('content-type') || '';
+
+      if (looksLikeContainer404(r.status, ct, text)) {
+        // 容器级 404 = 这个前缀下没有应用，直接排除，不必再试第二条。
+        //
+        // 带上 container404 标记：全部候选都是容器 404 是一个很有信息量的结论
+        // （Tomcat 活着但没有应用挂载 context-path），和"是这套框架但前缀猜错"
+        // 完全不是一回事，界面必须能分开说。
+        return {
+          prefix: pfx || '/', hit: false, url: full, status: r.status, kind: u.kind,
+          container404: true,
+          // Tomcat 默认错误页的语言头，拿来当证据展示，用户一看就知道没进 Spring
+          containerLang: r.headers.get('content-language') || '',
+          bytes: Buffer.byteLength(text || ''),
+        };
+      }
+
+      let json = null;
+      try { json = JSON.parse(text); } catch { /* 不是 JSON 也无所谓 */ }
+
+      // 命中判定必须收得够紧。
+      //
+      // 教训来自实测：本机 9999 端口上跑着另一个 java 进程（和 8083 同一个 pid，
+      // 只是另一个应用），它对 /report/api/actuator/health 一律返回
+      //   200 {"code":500,"msg":"invalid request, HttpMethod not support."}
+      // —— 任何路径都回 200，只看「不是 404」就会把它当成命中。
+      //
+      // 所以只认 tsie 框架的两种签名：
+      //   1) actuator/health 返回 {"status":"UP",...}
+      //   2) 返回体里带 retCode 字段（T200/T302/T401/TSIE702…）
+      // 其它形状的 200（code/msg、纯 HTML 首页…）一律不算命中。
+      const hasRetCode = !!(json && typeof json === 'object' && 'retCode' in json);
+      const isHealthUp = !!(json && String(json.status || '').toUpperCase() === 'UP');
+      const hit = (u.kind === 'health' && isHealthUp) || hasRetCode;
+
+      if (!hit) {
+        if (!loose) {
+          loose = {
+            prefix: pfx || '/', hit: false, url: full, status: r.status, kind: u.kind,
+            contentType: ct, why: 'not-tsie', sample: String(text || '').slice(0, 120),
+          };
+        }
+        continue;   // 换下一条探测 URL 再试，别急着放弃这个前缀
+      }
+
+      return {
+        prefix: pfx || '/',
+        hit: true,
+        url: full,
+        status: r.status,
+        kind: u.kind,
+        // 顺带把「这个服务长什么样」回报出去，界面能据此判断是哪套框架
+        contentType: ct,
+        health: u.kind === 'health' && isHealthUp ? json : null,
+        // T302 说明前缀对、且需要登录 —— 这是最常见的情况，值得单独标出来
+        needLogin: !!(json && String(json.retCode || '') === 'T302'),
+        retCode: json && json.retCode ? String(json.retCode) : '',
+      };
+    } catch (e) {
+      return {
+        prefix: pfx || '/',
+        hit: false,
+        url: full,
+        status: 0,
+        kind: u.kind,
+        error: e.name === 'TimeoutError' ? '超时' : connErrorCode(e) || e.message,
+      };
+    }
+  }
+  // 两条都不像 tsie，但服务是通的：把旁证带回去，让界面能说明缘由
+  return loose || { prefix: pfx || '/', hit: false };
+}
+
+/**
+ * 从「已知的登录路径」反推前缀。
+ *
+ * 用户可能已经把登录路径填对了（比如 /report/api/login），这时没必要盲猜 ——
+ * 把 /login 去掉、再把 dispatcher 那一段（默认 /api）剪掉，剩下的就是前缀。
+ * 这是最准的来源，优先级高于内置候选表。
+ */
+function prefixesFromKnownPaths(state, mvcPath) {
+  const mvc = '/' + String(mvcPath || '').replace(/^\/+|\/+$/g, '');
+  const out = [];
+  const take = (p) => {
+    const s = String(p || '').trim();
+    if (!s.startsWith('/')) return;
+    let parts = s.split('/').filter(Boolean);
+    if (parts.length <= 1) return;
+    parts = parts.slice(0, -1); // 去掉最后的动作段（login / switchTenant …）
+    // 去掉 dispatcher 段：/report/api → /report
+    const tail = '/' + parts[parts.length - 1];
+    if (mvc !== '/' && tail === mvc) parts = parts.slice(0, -1);
+    // 只为反推，逐级往上都当候选（/a/b → /a/b, /a）
+    for (let n = parts.length; n >= 1; n--) {
+      const pfx = '/' + parts.slice(0, n).join('/');
+      if (!out.includes(pfx)) out.push(pfx);
+    }
+  };
+  take(state?.login?.path);
+  take(state?.tenantSwitch?.path);
+  take(state?.tenantList?.path);
+  return out;
+}
+
+/**
+ * 常见前缀候选。
+ *
+ * 顺序有讲究：先放本项目实际遇到过的（tsie 体系的 /report、/pds-std），
+ * 再放 Spring 项目里高频出现的。根路径 "/" 永远放最后 —— 它几乎总是会"命中"
+ * （很多服务在根上挂了兜底 handler），过早试它会把真正的前缀盖掉。
+ */
+const COMMON_PREFIXES = [
+  '/report',
+  '/pds-std',
+  '/pds',
+  '/api',
+  '/web',
+  '/app',
+  '/admin',
+  '/backend',
+  '/service',
+  '/platform',
+  '/gateway',
+  '/system',
+  '/manage',
+  '/console',
+  '/portal',
+];
+
+/**
+ * 探测入口：对一个后端基址，猜出它能用的 context-path。
+ *
+ * 排序是这里最关键的一步。
+ *
+ * 不能「按候选表顺序一命中就返回」：这套框架的兜底 handler 会把任何已进入应用的
+ * 路径都变成 T302，于是 `/report` 和 `/report/api` 都会"命中"。真正的前缀是其中
+ * **最短**的那个（更长的都是在它之下的业务路径）。
+ *
+ * 所以按「层级由浅到深」排序再顺序探测：第一个命中的必然是最短的命中，也就是
+ * 真正的 context-path。顺带还有个好处 —— 通常第 1、2 次就命中，不会白打十几个请求。
+ * 同层级内保持原顺序（用户显式给的 > 从现有路径反推的 > 内置常见值）。
+ *
+ * @param {string} base 形如 http://127.0.0.1:8083
+ * @param {object} opts { mvcPath, candidates, timeoutMs }
+ */
+async function probePrefixes(base, opts = {}) {
+  const state = loadState();
+  const mvcPath = opts.mvcPath !== undefined ? opts.mvcPath : state?.mvcPath || '/api';
+  const timeoutMs = Math.max(800, Number(opts.timeoutMs) || 5000);
+
+  // 回环兜底：用户填 127.0.0.1 但后端只绑了 ::1 时，探测不该凭空失败。
+  // 先判断哪个主机名真的通，再拿它去做后续所有探测 —— 免得每条候选都各试一遍，
+  // 5 个前缀 × 3 个主机名 = 15 次超时，界面会卡到令人怀疑程序挂了。
+  const bases = state.autoLoopback === false ? [base] : loopbackVariants(base);
+  let realBase = base;
+  let reachable = false;
+  for (const b of bases) {
+    const r = await probeOnePrefix(b, '/', mvcPath, timeoutMs);
+    if (r.status !== 0) { realBase = b; reachable = true; break; }
+  }
+  if (!reachable) {
+    // 连不上就是连不上，别拿候选前缀挨个去撞超时
+    return {
+      base,
+      mvcPath,
+      hit: false,
+      reachable: false,
+      // 和另外几种失败对齐，前端可以只按 reason 分支，不用先看 reachable
+      reason: 'unreachable',
+      error: '后端不可达（不是前缀问题）',
+      tried: [],
+      durationMs: 0,
+    };
+  }
+
+  // 候选优先级：用户显式给的 > 从现有路径反推 > 内置常见表
+  const explicit = Array.isArray(opts.candidates) ? opts.candidates.filter((x) => typeof x === 'string') : [];
+  // exclusive = 「我不是让你猜，我是让你验证我给的这一个」。
+  // 这时绝不能合并候选表：否则更浅的 /report 一旦先命中，返回的就不是用户要验的那个，
+  // 用户会以为「我填 /foo-bar，它却告诉我前缀是 /report」。
+  const useExclusive = opts.exclusive === true && explicit.length > 0;
+  const fromKnown = prefixesFromKnownPaths(state, mvcPath);
+  const pool = useExclusive ? explicit : [...explicit, ...fromKnown, ...COMMON_PREFIXES];
+  const ordered = [];
+  for (const p of pool) {
+    const norm = String(p || '').trim();
+    if (!norm) continue;
+    const key = norm === '/' ? '' : norm.replace(/\/+$/, '');
+    if (!ordered.includes(key)) ordered.push(key);
+  }
+  // 层级浅的排前面；同层保持原序（Array.prototype.sort 在现代 V8 里是稳定的）
+  const depth = (p) => (p ? p.split('/').filter(Boolean).length : 0);
+  // 显式验证单个前缀时不排序：用户给什么就试什么，顺序是他自己定的
+  const list = useExclusive ? ordered : ordered.slice().sort((a, b) => depth(a) - depth(b));
+
+  const started = Date.now();
+  const results = [];
+  let best = null;
+  // 连续多少个前缀「连得上但不像 tsie」。
+  // tsie 框架的前缀填错时给的是容器 404（已被排除，走不到这里），
+  // 所以连续出现 not-tsie 只说明一件事：这个端口上根本不是这套框架，
+  // 再换 15 个前缀去撞也是 30 次白费请求 —— 攒够 3 个就收工。
+  let notTsieRun = 0;
+
+  for (const pfx of list) {
+    const r = await probeOnePrefix(realBase, pfx || '/', mvcPath, timeoutMs);
+    results.push(r);
+    if (r.hit) {
+      best = r;
+      // 浅层已命中，再往深处试只可能命中它自己的子路径 —— 停
+      break;
+    }
+    // 连不上后端就没必要继续换了 —— 这是网络层问题，不是前缀问题
+    if (r.status === 0) break;
+    if (r.why === 'not-tsie') {
+      notTsieRun += 1;
+      if (notTsieRun >= 3) break;
+    } else {
+      notTsieRun = 0;
+    }
+  }
+
+  const pfxOut = best ? (best.prefix === '/' ? '' : best.prefix) : '';
+  const sawNonTsie = results.some((r) => r.why === 'not-tsie');
+  // 全部候选都撞在容器错误页上：Tomcat 是活的，但没有任何应用挂载 context-path。
+  // 实测 8080 上的 WebRunRpcApplication 就是这样 —— 任何路径（含根）都回同一个
+  // 431 字节、Content-Language: en 的 Tomcat 404，一个 Spring 应用都没挂上。
+  const allContainer404 = results.length > 0 && results.every((r) => r.container404);
+
+  return {
+    base: realBase,
+    askedBase: base,
+    hostSwitched: realBase !== base,
+    mvcPath,
+    hit: !!best,
+    reachable: true,
+    // 告诉前端这次是「验证指定前缀」而不是「猜前缀」，两者文案不一样
+    exclusive: useExclusive,
+    // 没探到前缀时，把原因分清楚。这几种对用户来说是完全不同的几件事：
+    //   unreachable → 服务没起 / 端口不对
+    //   not-tsie    → 端口上确实有东西，但不是这套框架，换端口
+    //   no-app      → Tomcat 活着，但没应用挂载（服务还在启动 / 这不是业务端口）
+    //   no-prefix   → 应用在，但候选表里没有这个前缀，得手工看日志里的 WEB_PROJECT
+    //   prefix-miss → （只在 exclusive 模式）你指定的那个前缀下没有应用，前缀本身错了
+    reason: best
+      ? 'ok'
+      : sawNonTsie
+        ? 'not-tsie'
+        : allContainer404
+          ? (useExclusive ? 'prefix-miss' : 'no-app')
+          : 'no-prefix',
+    // 命中的前缀就是「该填在登录路径前面的那段」
+    prefix: pfxOut,
+    path: best ? `${pfxOut}${mvcPath}` : '',
+    loginPath: best ? `${pfxOut}${mvcPath}/login` : '',
+    switchPath: best ? `${pfxOut}${mvcPath}/switchTenant` : '',
+    needLogin: !!(best && best.needLogin),
+    health: best ? best.health : null,
+    // actuator 拿到 UP 才算"确定"；只是 T302 的话是推断，界面要如实区分
+    confidence: best ? (best.health ? 'high' : 'medium') : 'none',
+    // 全量回显试过哪些，界面可以折起来；排查时这是最有用的证据
+    tried: results.map((r) => ({
+      prefix: r.prefix,
+      hit: !!r.hit,
+      status: r.status,
+      kind: r.kind,
+      retCode: r.retCode,
+      why: r.why,
+      container404: !!r.container404,
+      error: r.error,
+    })),
+    durationMs: Date.now() - started,
+  };
+}
+
 /* -------------------------------- 路由 -------------------------------- */
 
 const requestHandler = async (req, res) => {
@@ -619,6 +962,40 @@ const requestHandler = async (req, res) => {
         askedHost,
         tried: tried.map((t) => `${t.host}${t.code ? `(${t.code})` : ''}`),
       });
+    }
+
+    // 前缀探测：猜这个后端的 context-path
+    //
+    // 解决的是「换了个服务，登录路径该填什么」这个高频问题。
+    // 填错前缀的表现是 404（不是 401），很容易被误判成账号密码错，
+    // 所以这里直接把前段猜出来、连登录路径一起给了。
+    if (pathname === '/api/probe-prefix') {
+      if (req.method !== 'POST') return sendJSON(res, 405, { error: '仅支持 POST' });
+      const raw = await readBody(req);
+      let payload = {};
+      try {
+        payload = JSON.parse(raw || '{}');
+      } catch {
+        return sendJSON(res, 400, { error: '请求体必须是 JSON' });
+      }
+      const state = loadState();
+      const base = String(payload.base || state.target || '').trim();
+      if (!base) return sendJSON(res, 400, { error: '缺少后端地址' });
+
+      try {
+        const out = await probePrefixes(base, {
+          mvcPath: payload.mvcPath,
+          candidates: payload.candidates,
+          // exclusive=true 时只验证 candidates 里的前缀，不合并候选表 ——
+          // 用于「用户自己填了一个前缀，让我确认它对不对」这条路径
+          exclusive: payload.exclusive === true,
+          timeoutMs: payload.timeoutMs,
+          autoLoopback: state.autoLoopback !== false,
+        });
+        return sendJSON(res, 200, { ok: true, ...out });
+      } catch (e) {
+        return sendJSON(res, 200, { ok: false, error: e.message || '探测失败' });
+      }
     }
 
     // 把会话写进浏览器自己的 Cookie 罐

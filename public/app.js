@@ -80,6 +80,10 @@ async function loadState() {
   // 老配置里没有这个字段。服务端按「缺省即开启」处理（!== false），
   // 前后端必须一致，否则复选框显示未勾选、实际却在兜底，用户会以为开关失灵。
   if (state.autoLoopback === undefined) state.autoLoopback = true;
+  // 探测前缀时假设的 dispatcher 段（spring.mvc.servlet.path）。
+  // 必须显式兜底：saveState 是全量覆盖，读到 undefined 再原样写回会把这个
+  // 字段从配置文件里抹掉，下次探测就退回硬编码默认值了。
+  if (!state.mvcPath) state.mvcPath = '/api';
 }
 
 async function saveState() {
@@ -1629,6 +1633,9 @@ function bindSearchSelect(ss, field) {
 
 function openForm(title, fields, values, onOk) {
   $('#formTitle').textContent = title;
+  // 探测结果弹窗会把主按钮改成「填入配置 / 知道了」并临时接管 formOnOk，
+  // 这里必须还原，否则下一次打开普通表单会顶着上一个弹窗的按钮文案。
+  $('#formOk').textContent = '确定';
   $('#formBody').innerHTML = fields.map((f) => {
     const v = values[f.key] ?? f.default ?? '';
     if (f.type === 'select') {
@@ -1890,6 +1897,347 @@ function renderResp() {
   else pre.textContent = lastResp.curl || '';
 }
 
+/* ======================== 前缀探测（context-path） ======================== */
+
+/**
+ * 从一条已配置的路径里拆出「前缀」和「业务尾巴」。
+ *
+ * 已知的登录路径长这样：  /report/api/login
+ *                          └─┬──┘└┬┘└─┬─┘
+ *                          前缀  dispatcher  动作
+ * 拆出来就是 { prefix: '/report', tail: '/api/login' }。
+ *
+ * 注意：这个函数假定路径只有「一个动作段」（login 就是典型）。
+ * 像 /report/api/pf/tenant/all 这种多段业务路径，它会把 /all 之外全当前缀 ——
+ * 所以只拿来拆 login.path，不要拿它去拆租户列表那种深路径。
+ * 真正换前缀的操作交给 reprefix()，那是纯字符串替换，不吃这个假设。
+ */
+function splitKnownPath(path, mvc) {
+  const p = String(path || '').trim();
+  const m = '/' + String(mvc || '').replace(/^\/+|\/+$/g, '');
+  if (!p.startsWith('/')) return null;
+  const parts = p.split('/').filter(Boolean);
+  if (parts.length <= 1) return null;
+  // 去掉动作段（login / switchTenant / all …）
+  const head = parts.slice(0, -1);
+  const tailIdx = m !== '/' && head.length && '/' + head[head.length - 1] === m
+    ? head.length - 1
+    : head.length;
+  if (tailIdx < 1) return null;
+  const prefix = '/' + head.slice(0, tailIdx).join('/');
+  const tail = '/' + parts.slice(tailIdx).join('/');
+  return { prefix, tail };
+}
+
+/**
+ * 把一条路径的前缀换掉，业务段原样保留。
+ * 拆不出来（结构没见过）就返回 null，由调用方决定「这条不动」。
+ */
+function reprefix(path, oldPrefix, oldMvc, newPrefix, mvc) {
+  const oldBase = (oldPrefix === '/' ? '' : oldPrefix) + (mvc || '');
+  const newBase = (newPrefix === '/' ? '' : newPrefix) + (mvc || '');
+  const p = String(path || '').trim();
+  if (!p.startsWith(oldBase + '/')) return null;
+  return newBase + p.slice(oldBase.length);
+}
+
+/**
+ * 探测后端前缀。
+ *
+ * 背景：同一个 tsie 框架下的不同服务，context-path 各不相同
+ * （pps-report 是 /report，pds-platform-be 是 /pds-std），
+ * 换一个后端就要跟着换前缀，否则登录必然 404 —— 而 404 看起来很像「账号密码错了」。
+ */
+async function probePrefix() {
+  const btn = $('#probePrefixBtn');
+  const base = (state.target || '').trim();
+  if (!base) return toast('先填后端地址', 'err');
+
+  btn.disabled = true;
+  const label = btn.textContent;
+  btn.textContent = '探测中…';
+  renderPing('wait', '探测前缀…');
+
+  try {
+    const r = await fetch('/api/probe-prefix', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ base, mvcPath: state.mvcPath || '/api' }),
+    });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.error || '探测失败');
+
+    // 连不上：这是端口/进程问题，不是前缀问题，别让用户去改前缀
+    if (j.reachable === false) {
+      renderPing('bad', j.error || '后端不可达');
+      return toast('连不上后端，先确认服务起了没、端口对不对', 'err');
+    }
+
+    // 端口通、但不像这套框架：最常见的是填错端口（那个端口上是别的应用）
+    if (!j.hit && j.reason === 'not-tsie') {
+      renderPing('bad', '端口通，但不是 tsie 框架');
+      return toast('这个端口上确实有服务，但响应不是 tsie 格式，八成端口填错了', 'err');
+    }
+
+    // Tomcat 活着但没有任何应用挂在上面：不是前缀错，是这会儿没得登
+    if (!j.hit && j.reason === 'no-app') {
+      renderPing('bad', '端口通，但没应用部署');
+      return showProbeResult(j);
+    }
+
+    if (!j.hit) {
+      renderPing('bad', '没探到前缀');
+      return showProbeResult(j);
+    }
+
+    renderPing(
+      'ok',
+      `前缀 ${j.prefix || '(无)'}${j.confidence === 'high' ? ' · 已确认' : ' · 推断'}`,
+      `登录路径 ${j.loginPath}\n切换路径 ${j.switchPath}\n耗时 ${j.durationMs}ms`
+    );
+    showProbeResult(j);
+  } catch (e) {
+    renderPing('bad', '探测失败');
+    toast(e.message, 'err');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = label;
+  }
+}
+
+/** 探测结果弹窗：说清「探到了什么、凭什么是它」，并给一键填入。 */
+function showProbeResult(j) {
+  const mvc = j.mvcPath || state.mvcPath || '/api';
+  // 命中且前缀为空 = 服务确实直接挂在根路径；没命中时前缀是「还不知道」，
+  // 不能写「无」，那会被读成「根路径就是答案」。
+  const pfxLabel = j.hit
+    ? (j.prefix || '(无，服务直接挂在根路径)')
+    : '未确定';
+
+  const rows = [];
+  rows.push(['前缀', pfxLabel]);
+  rows.push(['dispatcher', mvc]);
+  if (j.hit) {
+    rows.push(['登录路径', j.loginPath]);
+    rows.push(['切换路径', j.switchPath]);
+  }
+  rows.push(['后端基址', j.base + (j.hostSwitched ? `（你填的 ${j.askedBase} 不通，已换名）` : '')]);
+  // 不可达时连一个请求都没打出去，报「耗时 0ms」等于没说，干脆不显示
+  if (j.reachable !== false) rows.push(['耗时', j.durationMs + 'ms']);
+
+  // 凭什么是这个前缀：actuator 返回 UP 是硬证据，T302 只能是推断
+  let evidence;
+  if (j.hit && j.confidence === 'high') {
+    const comp = j.health && j.health.components ? Object.keys(j.health.components).join(' / ') : '';
+    evidence = `<p class="probe-ev ok">✅ 硬证据：<code>${esc(j.prefix + mvc)}/actuator/health</code>
+      返回 <code>status: UP</code>${comp ? `（${esc(comp)} 均正常）` : ''}</p>`;
+  } else if (j.hit) {
+    evidence = `<p class="probe-ev warn">⚠️ 推断：这个前缀下任意路径都返回 tsie 的 <code>retCode</code>
+      ${j.needLogin ? '（T302 未登录）' : ''}，说明请求进了应用，但没拿到 actuator 确认。
+      多数情况是对的；万一登录还 404，就说明这个服务没开 actuator，需手工核对启动日志里的 <code>WEB_PROJECT</code>。</p>`;
+  } else if (j.reason === 'not-tsie') {
+    evidence = `<p class="probe-ev bad">❌ 这个端口上的服务任何路径都返回同一种 200（不是 tsie 的 <code>retCode</code> 格式），
+      说明它不是这套框架。<b>请检查端口</b>，而不是前缀。</p>`;
+  } else if (j.reason === 'no-app') {
+    // 这一档很容易被误解成"探测坏了"。要说清楚：能连上、但连 Spring 都没进。
+    evidence = `<p class="probe-ev bad">❌ 端口是通的，但试过的前缀<b>全部落到同一个 Tomcat 错误页</b>
+      （<code>Content-Language: en</code> + <code>431</code> 字节 + <code>HTTP Status 404 – Not Found</code>），
+      说明这条路径上根本没有 Spring 应用接住请求。
+      <br>常见原因有三个：① 服务还在启动/热部署中，等日志出现 <code>Started …Application</code> 再探；
+      ② 这个端口只是 RPC / 网关端口，本来就不提供 HTTP 业务接口；
+      ③ 应用挂的前缀不在候选表里 —— 那种情况<b>直接在下面填前缀验证</b>就行。</p>`;
+  } else if (j.reason === 'prefix-miss') {
+    evidence = `<p class="probe-ev bad">❌ 你给的这个前缀下没有应用：请求还是落在 Tomcat 的默认错误页上，
+      没进 Spring。前缀名拼错了，或者这个服务压根不挂这个前缀。</p>`;
+  } else {
+    evidence = `<p class="probe-ev bad">❌ 服务有应用在跑（至少有一条路径进了 Spring），但候选前缀里没有一个命中。
+      这个前缀多半是部署时用环境变量定的（<code>server.servlet.context-path: ${'${WEB_PROJECT:/xxx}'}</code>），
+      换套配置就换个名字，硬编码的候选表穷举不完。<b>在下面填进你知道的前缀验证一下</b>——
+      启动日志、网关配置、前端代码里的请求地址，任一处都能看到它。</p>`;
+  }
+
+  const tried = Array.isArray(j.tried) && j.tried.length
+    ? `<details class="probe-tried"><summary>试过 ${j.tried.length} 个前缀</summary>
+        <ul>${j.tried.map((t) => `<li><code>${esc(t.prefix)}</code>
+          → ${t.hit ? '命中' : t.error ? esc(t.error) : t.status}
+          ${t.kind ? `<em>${esc(t.kind)}</em>` : ''}
+          ${t.retCode ? `<code>${esc(t.retCode)}</code>` : ''}
+          ${t.why === 'not-tsie' ? '<em>非 tsie 响应</em>' : ''}
+          ${t.container404 ? '<em>容器404（没进应用）</em>' : ''}</li>`).join('')}
+        </ul></details>`
+    : '';
+
+  $('#formTitle').textContent = j.hit
+    ? (j.exclusive ? '这个前缀是对的' : '探测到前缀')
+    : j.reason === 'no-app'
+      ? '端口通，但没应用部署'
+      : j.reason === 'prefix-miss'
+        ? '这个前缀不对'
+        : '没探到前缀';
+
+  // 没命中时给一个「手动验证」入口。
+  // 内置候选表只有十几个常见值，真实世界的 context-path 千奇百怪（/foo-bar 这种），
+  // 光靠猜永远会有漏网 —— 但只要用户能从前端日志 / 网关配置 / 同事那儿问到那个名字，
+  // 就能验证它对不对。所以「猜不到」不该是死路。
+  const manual = j.hit
+    ? ''
+    : `<div class="probe-manual">
+        <label for="probeManualInput">知道前缀叫什么？填进来验一下</label>
+        <div class="probe-manual-row">
+          <input id="probeManualInput" type="text" spellcheck="false" placeholder="/foo-bar（没有前缀就填 /）"
+            value="${esc(j.reason === 'prefix-miss' ? (j.tried && j.tried[0] ? j.tried[0].prefix : '') : '')}">
+          <button class="btn btn-ghost" id="probeManualBtn" type="button">验证</button>
+        </div>
+        <p class="probe-manual-hint">验证只发两次请求，不改你的配置；验过之后会变成「填入配置」。</p>
+      </div>`;
+
+  $('#formBody').innerHTML =
+    `<table class="probe-table">${rows.map(([k, v]) => `<tr><th>${esc(k)}</th><td><code>${esc(v)}</code></td></tr>`).join('')}</table>`
+    + evidence + manual + tried;
+
+  // 只有真探到了才有「填入」这个动作
+  if (j.hit) {
+    $('#formOk').textContent = '填入配置';
+    formOnOk = async () => applyProbePrefix(j.prefix, mvc);
+  } else {
+    // 没命中就没有可填的，把「确定」变成「知道了」，别让用户点了以为改了什么
+    $('#formOk').textContent = '知道了';
+    formOnOk = async () => closeForm();
+  }
+
+  // 手动验证：只验用户点名的那一个前缀（exclusive），命中后弹窗直接换成「探到了」
+  const manualBtn = $('#probeManualBtn');
+  if (manualBtn) {
+    const go = async () => {
+      const input = $('#probeManualInput');
+      const raw0 = String(input.value || '').trim();
+      if (!raw0) return toast('先填一个前缀，不知道就填 /', 'err');
+      const raw = normalizePrefixInput(raw0, mvc);
+      // 把归一化结果写回输入框：用户填的是整条路径时，得让他看见实际验的是哪一段
+      if (raw !== raw0) input.value = raw;
+      manualBtn.disabled = true;
+      manualBtn.textContent = '验证中…';
+      try {
+        const r = await fetch('/api/probe-prefix', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            base: (state.target || '').trim(), mvcPath: mvc,
+            candidates: [raw], exclusive: true,
+          }),
+        });
+        const out = await r.json();
+        if (!out.ok) throw new Error(out.error || '验证失败');
+        if (out.hit) {
+          renderPing(
+            'ok',
+            `前缀 ${out.prefix || '(无)'}${out.confidence === 'high' ? ' · 已确认' : ' · 推断'}`,
+            `登录路径 ${out.loginPath}\n切换路径 ${out.switchPath}\n耗时 ${out.durationMs}ms`
+          );
+          toast(`${raw} 验证通过`, 'ok');
+        } else {
+          toast(`${raw} 下没有应用接住请求`, 'err');
+        }
+        closeForm();
+        showProbeResult(out);   // 成败都刷新弹窗，把这次的证据摆出来
+      } catch (e) {
+        toast(e.message, 'err');
+        manualBtn.disabled = false;
+        manualBtn.textContent = '验证';
+      }
+    };
+    manualBtn.addEventListener('click', go);
+    $('#probeManualInput').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); go(); }
+    });
+  }
+
+  $('#formModal').classList.toggle('modal-wide', true);
+  $('#formMask').hidden = false;
+  $('#formModal').hidden = false;
+}
+
+/**
+ * 把「用户知道的那点信息」归一成一个前缀。
+ *
+ * 用户手里的线索通常不是干净的前缀，而是这三种之一：
+ *   http://127.0.0.1:8778/foo-bar/api/login   整条 URL（从浏览器地址栏 / 前端代码复制）
+ *   /foo-bar/api/login                        整条路径
+ *   /foo-bar                                  已经是前缀
+ *
+ * 前两种都能靠「定位 dispatcher 段」得到前缀。真实 URL 的形状永远是
+ *    context-path + servlet-path + 业务路径
+ * 而 servlet-path 就是用户配的 dispatcher（通常是 /api），它就是前缀和业务之间的那条分界线。
+ * 所以「从右边找最后一个 /api，它左边就是前缀」是最稳的切法。
+ *
+ * 不能用「剥掉末尾动作名」当主策略：/report/api/pf/tenant/all 剥掉 all 之后剩下
+ * /report/api/pf/tenant，把业务段 tenant 当成了前缀 —— 拿这个去验必然报「前缀不对」，
+ * 用户会以为「我知道的明明是对的，它却说不对」。
+ */
+function normalizePrefixInput(raw, mvc) {
+  let s = String(raw || '').trim();
+  if (!s) return s;
+  // 整条 URL：只留 path
+  if (/^https?:\/\//i.test(s)) {
+    try { s = new URL(s).pathname; } catch { /* 解析不了就按路径处理 */ }
+  }
+  s = s.replace(/[?#].*$/, '');          // 去掉 query / hash
+  if (!s.startsWith('/')) s = '/' + s;
+  s = s.replace(/\/{2,}/g, '/');
+  if (s.length > 1) s = s.replace(/\/+$/, '');
+
+  const parts = s.split('/').filter(Boolean);
+  if (parts.length <= 1) return '/' + parts.join('');   // '/' 或 '/foo'
+
+  // 主力：定位 dispatcher 段（取最后一个，因为 context-path 本身也可能叫 /api）。
+  // 它左边的部分就是前缀;右边全是业务路径,不用关心业务路径有多深。
+  // i 可以到 0：/api/login 这种说明服务直接挂在根路径，前缀就是空。
+  const mvcParts = String(mvc || '').replace(/^\/+|\/+$/g, '').split('/').filter(Boolean);
+  if (mvcParts.length) {
+    for (let i = parts.length - mvcParts.length; i >= 0; i--) {
+      const seg = parts.slice(i, i + mvcParts.length);
+      if (seg.length === mvcParts.length && seg.every((x, k) => x.toLowerCase() === mvcParts[k].toLowerCase())) {
+        return '/' + parts.slice(0, i).join('/');
+      }
+    }
+  }
+
+  // 兜底：路径里没有 dispatcher（用户只贴了业务路径的一半，或者 dispatcher 被改过）。
+  // 这时只能剥末尾的明显「动作名」，剥不动就原样返回 —— 宁可让用户看到自己填的东西，
+  // 也不要瞎猜一个他不认识的前缀。
+  const looksLikeAction = (seg) => /^(login|logout|switchtenant|all|list|query|page|search|info|detail)$/i.test(seg);
+  while (parts.length > 1 && looksLikeAction(parts[parts.length - 1])) parts.pop();
+  return '/' + parts.join('/');
+}
+
+/**
+ * 把探到的前缀写进配置：三条路径一起改。
+ *
+ * 抽成独立函数是因为它有两个入口（探测命中直接填 / 手动验证通过后填）。
+ * 逻辑写两遍的话，早晚有一边会忘了改租户列表。
+ */
+async function applyProbePrefix(prefix, mvc) {
+  const old = splitKnownPath(state.login.path, mvc);
+  const oldPrefix = old ? old.prefix : null;
+  if (!oldPrefix) {
+    closeForm();
+    return toast('现有登录路径拆不出前缀，请手工改', 'err');
+  }
+  const changed = [];
+  const setPath = (obj, key, label) => {
+    const next = reprefix(obj[key], oldPrefix, mvc, prefix || '/', mvc);
+    if (next && next !== obj[key]) { obj[key] = next; changed.push(label); }
+  };
+  setPath(state.login, 'path', '登录');
+  setPath(state.tenantSwitch, 'path', '切换租户');
+  setPath(state.tenantList, 'path', '租户列表');
+  state.mvcPath = mvc;
+  await saveState();
+  closeForm();
+  renderAll();
+  toast(changed.length ? `已更新 ${changed.join(' / ')} 路径` : '路径没变化，可能本来就填对了', 'ok');
+}
+
 /* ============================ 事件绑定 ============================ */
 
 function bindEvents() {
@@ -1935,6 +2283,9 @@ function bindEvents() {
   };
   $('#pingBtn').addEventListener('click', ping);
   ping(); // 打开页面就自动探一次，省得还要手点
+
+  // 探测前缀：换后端时先点这个，别硬猜 /report 还是 /pds-std
+  $('#probePrefixBtn').addEventListener('click', probePrefix);
 
   // 新增按钮
   $$('[data-add]').forEach((b) => {

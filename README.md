@@ -88,6 +88,83 @@ npm run verify:exe  # 单独再看一遍 PE 里的图标资源明细
 > 填了 `127` 也不至于失败，面板会自动换名兜底并如实告诉你（见
 > [回环自动兜底](#后端有的只认-localhost有的只认-127001回环自动兜底)）。
 
+### 1️⃣.5 不知道前缀填什么？点「探测前缀」
+
+同一个 tsie 框架下的**不同服务，context-path 各不相同**：
+
+| 服务 | 端口 | context-path |
+|---|---|---|
+| `pps-report`（报表） | 8083 | `/report` |
+| `pds-platform-be` | 8080 | `/pds-std` |
+
+⚠️ 注意端口别混：本机 8080 上跑的可能是 `WebRunRpcApplication`（RPC 网关，没有业务 HTTP 接口），
+`pds-platform-be` 起来之后未必还在 8080。**以探测结果为准**，不要照抄表格。
+
+填错了就是容器级 404 —— 而 404 长得极像「账号密码不对」，很容易白折腾半天。
+
+所以顶栏放了个 **「探测前缀」** 按钮（在「检测」旁边）：它会自动试
+`/report`、`/pds-std`、`/pds`、`/api` 等常见值，探到了直接把正确的登录路径给你，
+点「填入配置」就一次性改好登录 / 切换租户 / 租户列表三条路径。
+
+**它凭什么判断对错**——只有两种响应算命中：
+
+| 探测 URL | 响应 | 结论 |
+|---|---|---|
+| `<前缀>/api/actuator/health` | `{"status":"UP",...}` | ✅ **硬证据**，confidence = `high` |
+| `<前缀>/api/__devswitch_probe__` | `{"retCode":"T302",...}` | ✅ 请求进了应用，confidence = `medium` |
+| 任意路径 | `HTTP 404` + `HTTP Status 404` 的 HTML | ❌ 容器级 404，这个前缀不存在 |
+| 任意路径 | `{"code":500,"msg":...}` 这类非 `retCode` 格式 | ❌ 不是这套框架，**端口填错了** |
+
+两个细节值得记住，都是踩出来的：
+
+- 候选**按层级由浅到深**排序，命中即停。因为这套框架的兜底 handler 会让
+  `/report/api/api/actuator/health` 也返回 `T302`，取「第一个命中」会选出更长的错误前缀。
+- 判定**只认 tsie 的签名**（`status: UP` 或带 `retCode`）。本机实测过 9999 端口上
+  另一个 Java 进程，它对任何路径都返回同一个 `200 {"code":500,...}`，只判「不是 404」
+  就会把它当成命中。
+
+探不到时它会明确告诉你是哪一种，别混为一谈：
+
+| 提示 | 真正该做什么 |
+|---|---|
+| 后端不可达 | 服务没起 / 端口不对（**不是前缀问题**） |
+| 端口通，但不是 tsie 框架 | 端口填错了，那个端口上是别的应用 |
+| **端口通，但没应用部署** | Tomcat 活着，所有路径都吐同一个错误页 → 服务还在启动、或这个端口只跑 RPC 不提供 HTTP 业务接口 |
+| 没探到前缀 | 有应用在跑，但候选表没有 → 去启动日志找 `WEB_PROJECT` / `server.servlet.context-path` |
+
+> **「端口通，但没应用部署」是本机真实踩到的坑**：8080 上跑的是
+> `com.tsintergy.esplatform.web.WebRunRpcApplication`，`/`、`/actuator/health`、
+> `/report/api/login` **全部**返回同一个 `HTTP 404` + `Content-Length: 431` +
+> `Content-Language: en` 的 Tomcat 默认错误页。此时「检测」照样是绿点（能收到响应就算在线），
+> 但没有任何 context-path 可登 —— 探测说「探不到」是**如实结论**，不是功能坏了。
+> 想登录报表服务就用 8083 的 `/report`。
+
+#### 候选表探不到怎么办？填一个来验
+
+上面那张候选表是**有限的**（`/report`、`/pds-std`、`/pds`、`/api`、`/web`… 十几个）。
+`context-path` 是部署期配置（`server.servlet.context-path: ${WEB_PROJECT:/report}`），
+**同一个 jar 换套环境变量就变成另一个前缀**，所以「猜」这条路注定有穷尽不到的地方。
+
+探不到时弹窗底部会出现一个**手动验证**输入框，把你知道的那个前缀填进去即可：
+
+| 你可以贴什么 | 会自动归一成 |
+|---|---|
+| `http://127.0.0.1:8778/foo-bar/api/login` | `/foo-bar` |
+| `/foo-bar/api/pf/tenant/all` | `/foo-bar` |
+| `/foo-bar/api` | `/foo-bar` |
+| `/foo-bar` | `/foo-bar` |
+
+归一靠的是**定位 dispatcher 段**（你配的 `/api`）：真实 URL 永远是
+`context-path + servlet-path + 业务路径`，`/api` 就是前缀和业务之间的那条分界线，
+它左边就是前缀。所以整条 URL、深层业务路径、光是前缀，三种贴法都能用，
+**不用自己手动截断**。
+
+验证只发两次请求、**不改任何配置**；验通了按钮就从「知道了」变成「填入配置」，
+点一下照样一次性改好登录 / 切换租户 / 租户列表三条路径。
+
+> 验通之后还有个副作用是好的：`/foo-bar` 会进入「从现有路径反推」的候选池，
+> 下次再点「探测前缀」，即使候选表里没这个名字也能直接探到 —— 换服务只需配置一次。
+
 ### 2️⃣ 配置 → 登录
 
 按你后端的登录接口填：
@@ -116,9 +193,9 @@ npm run verify:exe  # 单独再看一遍 PE 里的图标资源明细
 
 ---
 
-## 连 tsie / BaseResp 体系后端（pds-std 这类）
+## 连 tsie / BaseResp 体系后端（pds-std、pps-report 这类）
 
-如果你连的后端是 **tsie-framework**（`pds-platform-be` 等），有 4 个坑必须知道，否则会「看起来登录成功、其实全是失败」：
+如果你连的后端是 **tsie-framework**（`pds-platform-be`、`pps-report-backend` 等），有 4 个坑必须知道，否则会「看起来登录成功、其实全是失败」：
 
 ### 坑 1：HTTP 200 不代表成功
 
@@ -145,11 +222,17 @@ npm run verify:exe  # 单独再看一遍 PE 里的图标资源明细
 Spring Boot 的 `server.servlet.context-path` + `spring.mvc.servlet.path` 是**拼起来**的：
 
 ```
-context-path = /pds-std   +   servlet.path = /api
-= 真实地址 /pds-std/api/login
+context-path = /report   +   servlet.path = /api
+= 真实地址 /report/api/login
 ```
 
 直接访问 `/api/login` 会 404。
+
+**而且不同服务的 context-path 不一样**：`pds-platform-be` 是 `/pds-std`，`pps-report` 是 `/report`。
+它是部署期配置（`WEB_PROJECT` 环境变量），不是代码常量 —— 同一个 jar 换套 env 就变成另一个前缀。
+
+→ 不确定就点顶栏的 **「探测前缀」**，别硬猜。详见
+[1️⃣.5 不知道前缀填什么？点「探测前缀」](#15-不知道前缀填什么点探测前缀)。
 
 ### 坑 4：切租户失败也返回 T200
 
@@ -159,7 +242,29 @@ context-path = /pds-std   +   servlet.path = /api
 → 工具对切租户做了**双重判定**：`retCode` 必须是 `T200`，**且** `retMsg` 里不能出现「失败/错误/异常」。
 切成功后服务端会重新下发 `Authorization` cookie，工具会自动接住。
 
-### 推荐配置（pds-platform-be）
+### 推荐配置（pps-report 报表服务 / 端口 8083）
+
+`pps-report-backend` 也是同一套 tsie 框架，但 `context-path` 是 **`/report`**（不是 `/pds-std`），所以接口全在 `/report/api/...` 下。**直接填 `/pds-std/api/login` 会 404，面板就报「登录请求失败：HTTP 404」**——这是最常见的踩坑点。
+
+```
+后端地址        http://127.0.0.1:8083
+
+登录     POST  /report/api/login             json  {"username":"{{username}}","password":"{{password}}"}
+         Token 来源 = Cookie，Token 名称 = Authorization
+         成功码 retCode = T200
+
+切租户   POST  /report/api/switchTenant      form  tenantId={{tenantId}}
+         成功码 retCode = T200
+
+租户列表 GET   /report/api/pf/tenant/all
+         列表路径 = data，ID = tenantId，名称 = name
+```
+
+> 注意：`/report/api/login` 已实测返回 `Set-Cookie: Authorization=<jwt>`（JWT 里带 `uId` / `tId` / `tName`），
+> 登录只认 **POST**，GET 会返回 `T401 Authentication method not supported: GET`。
+> `switchTenant` 只认 `application/x-www-form-urlencoded`，发 JSON 会 500。
+
+### 推荐配置（pds-platform-be / pds-std）
 
 ```
 后端地址        http://127.0.0.1:8080
